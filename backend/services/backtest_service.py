@@ -36,6 +36,7 @@ def run_backtest(
     qualifying_df: pd.DataFrame,
     strategy_def: dict,
     init_cash: float = 10000.0,
+    risk_r: float = 100.0,
     fees: float = 0.0,
     slippage: float = 0.0,
 ) -> dict:
@@ -105,6 +106,7 @@ def run_backtest(
                 exits=exits_arr,
                 direction=signals["direction"],
                 init_cash=init_cash,
+                risk_r=risk_r,
                 fees=fees,
                 slippage=slippage,
                 sl_stop=signals["sl_stop"],
@@ -166,7 +168,7 @@ def run_backtest(
 
     t4 = time.time()
     aggregate = _aggregate_metrics(day_results, all_trades)
-    global_eq, global_dd = _compute_global_equity_and_drawdown(all_equity, init_cash)
+    global_eq, global_dd = _compute_global_equity_and_drawdown(all_trades, init_cash)
     logger.info(f"[AGG] aggregate+equity done ({round(time.time()-t4, 2)}s)")
 
     logger.info(
@@ -279,7 +281,7 @@ def _compute_r_multiple(
 # Equity extraction
 # ---------------------------------------------------------------------------
 
-_MAX_EQUITY_POINTS = 100
+_MAX_EQUITY_POINTS = 500
 
 
 def _extract_equity_from_values(eq_vals: np.ndarray, timestamps: pd.Series) -> list[dict]:
@@ -303,46 +305,42 @@ def _extract_equity_from_values(eq_vals: np.ndarray, timestamps: pd.Series) -> l
 # ---------------------------------------------------------------------------
 
 def _compute_global_equity_and_drawdown(
-    all_equity: list[dict],
+    all_trades: list[dict],
     init_cash: float,
 ) -> tuple[list[dict], list[dict]]:
-    if not all_equity:
+    """Build equity curve as cumulative P&L per calendar day.
+
+    Logic: start at init_cash, group trades by date, sum daily P&L,
+    accumulate.  equity[day] = equity[prev_day] + sum(pnl of trades on day).
+    """
+    if not all_trades:
         return [], []
 
-    day_arrays = []
-    carry = 0.0
-    for day_eq in all_equity:
-        points = day_eq.get("equity", [])
-        if not points:
+    # Group trade P&L by date
+    daily_pnl: dict[str, float] = {}
+    for trade in all_trades:
+        date_str = trade.get("date", "")
+        if not date_str:
             continue
-        day_vals = np.array([pt["value"] for pt in points], dtype=np.float64)
-        day_start = day_vals[0]
-        offset = carry - day_start + init_cash if not day_arrays else carry - day_start
-        day_vals = day_vals + offset
-        day_arrays.append(day_vals)
-        carry = day_vals[-1]
+        daily_pnl[date_str] = daily_pnl.get(date_str, 0.0) + trade.get("pnl", 0.0)
 
-    if not day_arrays:
+    if not daily_pnl:
         return [], []
 
-    values = np.concatenate(day_arrays)
+    # Sort by date and build cumulative equity
+    sorted_dates = sorted(daily_pnl.keys())
+    cumulative = init_cash
+    equity_values = []
+    for d in sorted_dates:
+        cumulative += daily_pnl[d]
+        equity_values.append(cumulative)
 
-    # #region agent log
-    try:
-        import json as _json, os as _os
-        _log_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__))), ".cursor", "debug-d50eeb.log")
-        _payload = {"sessionId":"d50eeb","location":"backtest_service.py:_compute_global_equity_and_drawdown","message":"global equity post-fix values","hypothesisId":"post-fix","data":{"total_points":int(len(values)),"n_days":len(day_arrays),"first5_values":values[:5].tolist()},"timestamp":int(__import__("time").time()*1000)}
-        _os.makedirs(_os.path.dirname(_log_path), exist_ok=True)
-        with open(_log_path, "a") as _f:
-            _f.write(_json.dumps(_payload) + "\n")
-    except Exception:
-        pass
-    # #endregion
+    values = np.array(equity_values, dtype=np.float64)
 
-    # Use sequential fake timestamps: global equity mixes multiple tickers on the
-    # same dates so real timestamps would overlap. timeVisible=false on this chart.
-    base_ts = 1_577_836_800  # 2020-01-01 00:00:00 UTC
-    times = base_ts + np.arange(len(values)) * 60
+    # Convert date strings to UNIX timestamps (midnight UTC)
+    times = np.array(
+        [int(pd.Timestamp(d).timestamp()) for d in sorted_dates], dtype=np.int64
+    )
 
     running_max = np.maximum.accumulate(values)
     dd_pct = np.where(running_max > 0, (values / running_max - 1) * 100, 0.0)

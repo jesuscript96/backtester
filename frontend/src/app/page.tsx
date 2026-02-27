@@ -14,11 +14,13 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [selectedDay, setSelectedDay] = useState(0);
   const initCashRef = useRef(10000);
+  const riskRRef = useRef(100);
 
   const handleRun = async (params: {
     dataset_id: string;
     strategy_id: string;
     init_cash: number;
+    risk_r: number;
     fees: number;
     slippage: number;
   }) => {
@@ -27,6 +29,7 @@ export default function Home() {
     setResult(null);
     setSelectedDay(0);
     initCashRef.current = params.init_cash;
+    riskRRef.current = params.risk_r;
 
     try {
       const data = await runBacktest(params);
@@ -131,7 +134,11 @@ export default function Home() {
                 />
               )}
 
-              <ResultsTabs result={result} initCash={initCashRef.current} />
+              <ResultsTabs
+                result={result}
+                initCash={initCashRef.current}
+                riskR={riskRRef.current}
+              />
             </>
           )}
         </main>

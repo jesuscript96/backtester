@@ -13,13 +13,14 @@ logger = logging.getLogger("backtester.backtest")
 
 router = APIRouter(prefix="/api", tags=["backtest"])
 
-MAX_DAYS = 500
+MAX_DAYS = 100000
 
 
 class BacktestRequest(BaseModel):
     dataset_id: str
     strategy_id: str
     init_cash: float = 10000.0
+    risk_r: float = 100.0
     fees: float = 0.0
     slippage: float = 0.0
 
@@ -72,6 +73,7 @@ def run_backtest_endpoint(req: BacktestRequest):
             qualifying_df=qualifying,
             strategy_def=strategy["definition"],
             init_cash=req.init_cash,
+            risk_r=req.risk_r,
             fees=req.fees,
             slippage=req.slippage,
         )

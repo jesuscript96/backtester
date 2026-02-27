@@ -31,6 +31,8 @@ def list_strategies() -> list[dict]:
             "name": r["name"],
             "description": r["description"],
             "definition": definition,
+            "created_at": str(r["created_at"]) if pd.notnull(r["created_at"]) else None,
+            "updated_at": str(r["updated_at"]) if pd.notnull(r["updated_at"]) else None,
         })
     return rows
 
@@ -64,6 +66,8 @@ def list_datasets() -> list[dict]:
         GROUP BY d.id, d.name, d.created_at
         ORDER BY d.created_at DESC
     """)
+    if not df.empty and "created_at" in df.columns:
+        df["created_at"] = df["created_at"].astype(str)
     return df.to_dict(orient="records")
 
 

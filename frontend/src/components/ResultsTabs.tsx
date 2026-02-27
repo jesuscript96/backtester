@@ -3,7 +3,6 @@
 import { useState } from "react";
 import type { BacktestResult } from "@/lib/api";
 import EquityCurveTab from "@/components/tabs/EquityCurveTab";
-import DrawdownTab from "@/components/tabs/DrawdownTab";
 import PerformanceTab from "@/components/tabs/PerformanceTab";
 import CalendarTab from "@/components/tabs/CalendarTab";
 import TradesTab from "@/components/tabs/TradesTab";
@@ -12,7 +11,6 @@ import PortfolioTab from "@/components/tabs/PortfolioTab";
 
 const TABS = [
   { id: "equity", label: "Equity Curve" },
-  { id: "drawdown", label: "Drawdown" },
   { id: "performance", label: "Performance" },
   { id: "calendar", label: "Calendar" },
   { id: "trades", label: "Trades" },
@@ -25,9 +23,10 @@ type TabId = (typeof TABS)[number]["id"];
 interface ResultsTabsProps {
   result: BacktestResult;
   initCash: number;
+  riskR: number;
 }
 
-export default function ResultsTabs({ result, initCash }: ResultsTabsProps) {
+export default function ResultsTabs({ result, initCash, riskR }: ResultsTabsProps) {
   const [activeTab, setActiveTab] = useState<TabId>("equity");
 
   return (
@@ -39,10 +38,9 @@ export default function ResultsTabs({ result, initCash }: ResultsTabsProps) {
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
               className={`px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors
-                ${
-                  activeTab === tab.id
-                    ? "text-[var(--accent)] border-b-2 border-[var(--accent)]"
-                    : "text-[var(--muted)] hover:text-[var(--foreground)]"
+                ${activeTab === tab.id
+                  ? "text-[var(--accent)] border-b-2 border-[var(--accent)]"
+                  : "text-[var(--muted)] hover:text-[var(--foreground)]"
                 }`}
             >
               {tab.label}
@@ -55,14 +53,20 @@ export default function ResultsTabs({ result, initCash }: ResultsTabsProps) {
         {activeTab === "equity" && (
           <EquityCurveTab
             globalEquity={result.global_equity}
+            globalDrawdown={result.global_drawdown}
             trades={result.trades}
+            initCash={initCash}
+            riskR={riskR}
           />
         )}
-        {activeTab === "drawdown" && (
-          <DrawdownTab globalDrawdown={result.global_drawdown} />
-        )}
+
         {activeTab === "performance" && (
-          <PerformanceTab dayResults={result.day_results} trades={result.trades} />
+          <PerformanceTab
+            dayResults={result.day_results}
+            trades={result.trades}
+            initCash={initCash}
+            riskR={riskR}
+          />
         )}
         {activeTab === "calendar" && (
           <CalendarTab dayResults={result.day_results} trades={result.trades} />

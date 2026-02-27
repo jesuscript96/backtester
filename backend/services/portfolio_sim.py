@@ -18,6 +18,7 @@ def simulate(
     exits: np.ndarray,
     direction: str = "longonly",
     init_cash: float = 10000.0,
+    risk_r: float = 100.0,
     fees: float = 0.0,
     slippage: float = 0.0,
     sl_stop: float | None = None,
@@ -156,7 +157,10 @@ def simulate(
                 continue
 
             entry_fee_rate = 1 + fees
-            size = available_cash / (entry_price * entry_fee_rate)
+            
+            allocated_cash = min(available_cash, risk_r)
+            size = allocated_cash / (entry_price * entry_fee_rate)
+
             if size <= 0:
                 equity[i] = init_cash + realized_pnl
                 continue

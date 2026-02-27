@@ -1,0 +1,14 @@
+´╗┐
+C:\Users\Famil\OneDrive\Escritorio\Jaume\My StrategyBuilder backtest\frontend\src\components\tabs\EquityCurveTab.tsx
+    8:3   warning  'BaselineSeries' is defined but never used                                                                           @typescript-eslint/no-unused-vars
+   98:19  error    Unexpected any. Specify a different type                                                                             @typescript-eslint/no-explicit-any
+  115:7   error    Use "@ts-expect-error" instead of "@ts-ignore", as "@ts-ignore" will do nothing if the following line is error-free  @typescript-eslint/ban-ts-comment
+  116:7   warning  'ddSeries' is assigned a value but never used                                                                        @typescript-eslint/no-unused-vars
+  116:96  error    Unexpected any. Specify a different type                                                                             @typescript-eslint/no-explicit-any
+  153:51  error    Unexpected any. Specify a different type                                                                             @typescript-eslint/no-explicit-any
+  153:93  error    A `require()` style import is forbidden                                                                              @typescript-eslint/no-require-imports
+  184:9   error    Use "@ts-expect-error" instead of "@ts-ignore", as "@ts-ignore" will do nothing if the following line is error-free  @typescript-eslint/ban-ts-comment
+  190:9   error    Use "@ts-expect-error" instead of "@ts-ignore", as "@ts-ignore" will do nothing if the following line is error-free  @typescript-eslint/ban-ts-comment
+
+├ö┬ú├╗ 9 problems (7 errors, 2 warnings)
+

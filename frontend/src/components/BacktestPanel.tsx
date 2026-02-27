@@ -9,6 +9,7 @@ interface BacktestPanelProps {
     dataset_id: string;
     strategy_id: string;
     init_cash: number;
+    risk_r: number;
     fees: number;
     slippage: number;
   }) => void;
@@ -21,6 +22,7 @@ export default function BacktestPanel({ onRun, loading }: BacktestPanelProps) {
   const [selectedDataset, setSelectedDataset] = useState("");
   const [selectedStrategy, setSelectedStrategy] = useState("");
   const [initCash, setInitCash] = useState(10000);
+  const [riskR, setRiskR] = useState(100);
   const [fees, setFees] = useState(0);
   const [slippage, setSlippage] = useState(0);
   const [loadingData, setLoadingData] = useState(true);
@@ -52,7 +54,7 @@ export default function BacktestPanel({ onRun, loading }: BacktestPanelProps) {
 
   useEffect(() => {
     loadData();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleRun = () => {
@@ -61,6 +63,7 @@ export default function BacktestPanel({ onRun, loading }: BacktestPanelProps) {
       dataset_id: selectedDataset,
       strategy_id: selectedStrategy,
       init_cash: initCash,
+      risk_r: riskR,
       fees: fees / 100,
       slippage: slippage / 100,
     });
@@ -133,7 +136,7 @@ export default function BacktestPanel({ onRun, loading }: BacktestPanelProps) {
           )}
         </div>
 
-        <div className="grid grid-cols-3 gap-2">
+        <div className="grid grid-cols-2 gap-2 mb-2">
           <div>
             <label className="block text-xs font-medium mb-1 text-[var(--muted)]">
               Capital ($)
@@ -145,6 +148,20 @@ export default function BacktestPanel({ onRun, loading }: BacktestPanelProps) {
               className="w-full border border-[var(--border)] rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
             />
           </div>
+          <div>
+            <label className="block text-xs font-medium mb-1 text-[var(--muted)]">
+              Riesgo 1R ($)
+            </label>
+            <input
+              type="number"
+              value={riskR}
+              onChange={(e) => setRiskR(Number(e.target.value))}
+              className="w-full border border-[var(--border)] rounded-md px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+            />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
           <div>
             <label className="block text-xs font-medium mb-1 text-[var(--muted)]">
               Fees (%)

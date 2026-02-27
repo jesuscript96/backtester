@@ -151,6 +151,7 @@ export async function runBacktest(params: {
   dataset_id: string;
   strategy_id: string;
   init_cash?: number;
+  risk_r?: number;
   fees?: number;
   slippage?: number;
 }): Promise<BacktestResult> {
