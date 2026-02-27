@@ -9,6 +9,7 @@ Performance strategy:
   - Phase 4: Extract per-column results from batched portfolios
 """
 
+import gc
 import logging
 import os
 import time
@@ -23,7 +24,7 @@ from backend.services.strategy_engine import translate_strategy
 
 logger = logging.getLogger("backtester.engine")
 
-_MAX_WORKERS = int(os.getenv("BACKTEST_WORKERS", min(os.cpu_count() or 2, 4)))
+_MAX_WORKERS = int(os.getenv("BACKTEST_WORKERS", "1"))
 _MIN_BATCH_SIZE = 2
 
 
@@ -56,24 +57,41 @@ def run_backtest(
         daily_stats = qual_lookup.get((ticker, date), {})
         signal_inputs.append((ticker, str(date), day_df, daily_stats))
 
-    logger.info(f"[PHASE 1] generating signals for {len(signal_inputs)} days...")
+    logger.info(f"[PHASE 1] generating signals for {len(signal_inputs)} days (workers={_MAX_WORKERS})...")
     t1 = time.time()
     prepared: list[tuple] = []
-    with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
-        future_map = {
-            executor.submit(translate_strategy, inp[2], strategy_def, inp[3]): inp
-            for inp in signal_inputs
-        }
-        for future in as_completed(future_map):
-            ticker, date, day_df, daily_stats = future_map[future]
+
+    if _MAX_WORKERS <= 1:
+        for i, (ticker, date, day_df, daily_stats) in enumerate(signal_inputs):
             try:
-                signals = future.result()
+                signals = translate_strategy(day_df, strategy_def, daily_stats)
             except Exception:
                 continue
             if not signals["entries"].any():
                 continue
             prepared.append((ticker, date, day_df, signals))
+            if (i + 1) % 25 == 0:
+                logger.info(f"[PHASE 1] ... {i+1}/{len(signal_inputs)} done ({round(time.time()-t1, 2)}s)")
+    else:
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
+            future_map = {
+                executor.submit(translate_strategy, inp[2], strategy_def, inp[3]): inp
+                for inp in signal_inputs
+            }
+            for future in as_completed(future_map):
+                ticker, date, day_df, daily_stats = future_map[future]
+                try:
+                    signals = future.result()
+                except Exception:
+                    continue
+                if not signals["entries"].any():
+                    continue
+                prepared.append((ticker, date, day_df, signals))
+
     logger.info(f"[PHASE 1] signals done: {len(prepared)} days with entries ({round(time.time()-t1, 2)}s)")
+
+    del grouped, signal_inputs
+    gc.collect()
 
     # Phase 2 — group by (bar_count, risk_params) for batching
     t2 = time.time()
@@ -82,6 +100,7 @@ def run_backtest(
         _ticker, _date, _day_df, _signals = item
         key = _batch_key(_day_df, _signals)
         batches[key].append(item)
+    del prepared
     batch_sizes = [len(v) for v in batches.values()]
     logger.info(f"[PHASE 2] {len(batches)} batch groups, sizes={batch_sizes} ({round(time.time()-t2, 2)}s)")
 

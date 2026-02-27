@@ -15,6 +15,6 @@ services:
       - key: ALLOWED_ORIGINS
         value: "https://backtester-psi.vercel.app,http://localhost:3000"
       - key: BACKTEST_WORKERS
-        value: "2"
+        value: "1"
       - key: PYTHON_VERSION
         value: "3.13.0"

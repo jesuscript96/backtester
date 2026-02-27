@@ -5,9 +5,13 @@ daily stats come from daily_metrics; intraday candles come from intraday_1m.
 """
 
 import json
+import logging
+import time
 import uuid
 import pandas as pd
 from backend.db.connection import query_df, execute_sql
+
+logger = logging.getLogger("backtester.data")
 
 
 # ---------------------------------------------------------------------------
@@ -108,33 +112,47 @@ def fetch_dataset_data(dataset_id: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         qualifying: daily stats from daily_metrics enriched with yesterday_high/low
         intraday: raw 1m candles from intraday_1m
     """
+    t0 = time.time()
+
+    # Filter daily_metrics to only relevant tickers BEFORE computing LAG
     qualifying_sql = """
-    WITH enriched AS (
+    WITH relevant_tickers AS (
+        SELECT DISTINCT ticker FROM dataset_pairs WHERE dataset_id = ?
+    ),
+    filtered_dm AS (
         SELECT dm.*,
-               CAST(dm."timestamp" AS DATE) AS date,
-               LAG(dm.rth_high) OVER (PARTITION BY dm.ticker ORDER BY dm."timestamp") AS yesterday_high,
-               LAG(dm.rth_low)  OVER (PARTITION BY dm.ticker ORDER BY dm."timestamp") AS yesterday_low,
-               dm.prev_close AS previous_close
+               CAST(dm."timestamp" AS DATE) AS date
         FROM daily_metrics dm
+        WHERE dm.ticker IN (SELECT ticker FROM relevant_tickers)
+    ),
+    enriched AS (
+        SELECT f.*,
+               LAG(f.rth_high) OVER (PARTITION BY f.ticker ORDER BY f."timestamp") AS yesterday_high,
+               LAG(f.rth_low)  OVER (PARTITION BY f.ticker ORDER BY f."timestamp") AS yesterday_low,
+               f.prev_close AS previous_close
+        FROM filtered_dm f
     )
     SELECT e.*
     FROM dataset_pairs dp
     INNER JOIN enriched e ON dp.ticker = e.ticker AND dp.date = e.date
     WHERE dp.dataset_id = ?
     """
-    qualifying = query_df(qualifying_sql, [dataset_id])
+    qualifying = query_df(qualifying_sql, [dataset_id, dataset_id])
+    t_q = time.time()
+    logger.info(f"qualifying query: {len(qualifying)} rows ({round(t_q - t0, 2)}s)")
 
     if qualifying.empty:
         return qualifying, pd.DataFrame()
 
     intraday_sql = """
     SELECT i.ticker, i.date, i."timestamp", i.open, i.high, i.low,
-           i."close", i.volume, i.transactions
+           i."close", i.volume
     FROM intraday_1m i
     INNER JOIN dataset_pairs dp ON i.ticker = dp.ticker AND i.date = dp.date
     WHERE dp.dataset_id = ?
-    ORDER BY i.ticker, i."timestamp"
     """
     intraday = query_df(intraday_sql, [dataset_id])
+    t_i = time.time()
+    logger.info(f"intraday query: {len(intraday)} rows ({round(t_i - t_q, 2)}s)")
 
     return qualifying, intraday

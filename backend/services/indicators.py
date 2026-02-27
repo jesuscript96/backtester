@@ -10,19 +10,34 @@ import vectorbt as vbt
 
 # Numba is optional — heavy on memory and cold-start JIT time.
 # Pure-numpy fallbacks are provided for every @njit kernel.
-try:
-    from numba import njit as _njit
-    _HAS_NUMBA = True
-except ImportError:
+# Force pure-numpy with USE_NUMBA_CUSTOM=0 (vectorbt still uses numba internally).
+import os as _os
+
+_FORCE_NO_NUMBA = _os.getenv("USE_NUMBA_CUSTOM", "0") == "0"
+
+if _FORCE_NO_NUMBA:
     _HAS_NUMBA = False
 
     def _njit(*args, **kwargs):  # noqa: ARG001
-        """No-op decorator when numba is not installed."""
+        """No-op decorator — using pure-numpy path."""
         def _wrap(fn):
             return fn
         if args and callable(args[0]):
             return args[0]
         return _wrap
+else:
+    try:
+        from numba import njit as _njit
+        _HAS_NUMBA = True
+    except ImportError:
+        _HAS_NUMBA = False
+
+        def _njit(*args, **kwargs):  # noqa: ARG001
+            def _wrap(fn):
+                return fn
+            if args and callable(args[0]):
+                return args[0]
+            return _wrap
 
 try:
     import talib as _talib
