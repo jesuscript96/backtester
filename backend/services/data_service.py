@@ -6,9 +6,7 @@ daily stats come from daily_metrics; intraday candles come from intraday_1m.
 
 import ctypes
 import gc
-import json
 import logging
-import resource
 import sys
 import time
 import uuid
@@ -16,21 +14,6 @@ import pandas as pd
 from backend.db.connection import query_df, execute_sql
 
 logger = logging.getLogger("backtester.data")
-
-# #region agent log helpers (debug-d20cd9)
-_DBG_LOG = "/Users/jvch/Desktop/AutomatoWebs/BacktesterMVP/.cursor/debug-d20cd9.log"
-def _rss_mb():
-    return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024 if sys.platform == "linux" else 1024), 1)
-def _dbg_ds(location, message, data, hyp):
-    entry = {"sessionId": "d20cd9", "timestamp": int(time.time() * 1000),
-             "location": location, "message": message, "data": data, "hypothesisId": hyp}
-    logger.info(f"[DBG-{hyp}] {message} | {data}")
-    try:
-        with open(_DBG_LOG, "a") as _f:
-            _f.write(json.dumps(entry) + "\n")
-    except Exception:
-        pass
-# #endregion
 
 
 # ---------------------------------------------------------------------------
@@ -176,9 +159,6 @@ def fetch_dataset_data(dataset_id: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     intraday = query_df(intraday_sql, [dataset_id])
     t_i = time.time()
     logger.info(f"intraday query: {len(intraday)} rows ({round(t_i - t_q, 2)}s)")
-    # #region agent log (debug-d20cd9)
-    _dbg_ds("data_service:after_fetch", "intraday fetched", {"rows": len(intraday), "rss_mb": _rss_mb(), "mem_mb": round(intraday.memory_usage(deep=True).sum() / 1e6, 1)}, "H-MEM")
-    # #endregion
 
     for col in ("open", "high", "low", "close"):
         if col in intraday.columns:
@@ -196,10 +176,6 @@ def fetch_dataset_data(dataset_id: str) -> tuple[pd.DataFrame, pd.DataFrame]:
             ctypes.CDLL("libc.so.6").malloc_trim(0)
         except Exception:
             pass
-
-    # #region agent log (debug-d20cd9)
-    _dbg_ds("data_service:after_optimize", "dtypes optimized", {"rss_mb": _rss_mb(), "mem_mb": round(intraday.memory_usage(deep=True).sum() / 1e6, 1)}, "H-MEM")
-    # #endregion
 
     return qualifying, intraday
 
