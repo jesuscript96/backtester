@@ -13,6 +13,8 @@ services:
       - key: MOTHERDUCK_DB
         value: Massive
       - key: ALLOWED_ORIGINS
-        sync: false
+        value: "https://backtester-psi.vercel.app,http://localhost:3000"
+      - key: BACKTEST_WORKERS
+        value: "2"
       - key: PYTHON_VERSION
         value: "3.13.0"

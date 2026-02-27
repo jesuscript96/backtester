@@ -19,7 +19,7 @@ import vectorbt as vbt
 
 from backend.services.strategy_engine import translate_strategy
 
-_MAX_WORKERS = min(os.cpu_count() or 4, 8)
+_MAX_WORKERS = int(os.getenv("BACKTEST_WORKERS", min(os.cpu_count() or 2, 4)))
 _MIN_BATCH_SIZE = 2
 
 

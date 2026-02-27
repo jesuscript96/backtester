@@ -1,13 +1,28 @@
 """
 Computes technical indicators from OHLCV data.
-Uses vectorbt built-in indicators where possible, numba for custom computations,
-TA-Lib with pandas_ta fallback for the rest.
+Uses vectorbt built-in indicators where possible, numba (optional) for custom
+computations, TA-Lib (optional) with pandas_ta fallback for the rest.
 """
 
 import numpy as np
 import pandas as pd
 import vectorbt as vbt
-from numba import njit
+
+# Numba is optional — heavy on memory and cold-start JIT time.
+# Pure-numpy fallbacks are provided for every @njit kernel.
+try:
+    from numba import njit as _njit
+    _HAS_NUMBA = True
+except ImportError:
+    _HAS_NUMBA = False
+
+    def _njit(*args, **kwargs):  # noqa: ARG001
+        """No-op decorator when numba is not installed."""
+        def _wrap(fn):
+            return fn
+        if args and callable(args[0]):
+            return args[0]
+        return _wrap
 
 try:
     import talib as _talib
@@ -21,10 +36,10 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# Numba-accelerated kernels
+# Numba-accelerated kernels (with pure-numpy fallbacks)
 # ---------------------------------------------------------------------------
 
-@njit(cache=True)
+@_njit(cache=True)
 def _vwap_nb(high: np.ndarray, low: np.ndarray, close: np.ndarray, volume: np.ndarray) -> np.ndarray:
     n = len(close)
     result = np.empty(n, dtype=np.float64)
@@ -38,7 +53,15 @@ def _vwap_nb(high: np.ndarray, low: np.ndarray, close: np.ndarray, volume: np.nd
     return result
 
 
-@njit(cache=True)
+def _vwap_pure(high: np.ndarray, low: np.ndarray, close: np.ndarray, volume: np.ndarray) -> np.ndarray:
+    typical = (high + low + close) / 3.0
+    cum_tp_vol = np.cumsum(typical * volume)
+    cum_vol = np.cumsum(volume)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(cum_vol != 0, cum_tp_vol / cum_vol, np.nan)
+
+
+@_njit(cache=True)
 def _consecutive_count_nb(signal: np.ndarray) -> np.ndarray:
     """Count consecutive True values in a boolean signal array."""
     n = len(signal)
@@ -53,7 +76,21 @@ def _consecutive_count_nb(signal: np.ndarray) -> np.ndarray:
     return result
 
 
-@njit(cache=True)
+def _consecutive_count_pure(signal: np.ndarray) -> np.ndarray:
+    s = signal.astype(np.int64)
+    n = len(s)
+    result = np.zeros(n, dtype=np.float64)
+    count = 0.0
+    for i in range(n):
+        if s[i]:
+            count += 1.0
+        else:
+            count = 0.0
+        result[i] = count
+    return result
+
+
+@_njit(cache=True)
 def _hammer_nb(
     open_: np.ndarray, high: np.ndarray, low: np.ndarray, close: np.ndarray
 ) -> np.ndarray:
@@ -67,7 +104,16 @@ def _hammer_nb(
     return result
 
 
-@njit(cache=True)
+def _hammer_pure(
+    open_: np.ndarray, high: np.ndarray, low: np.ndarray, close: np.ndarray
+) -> np.ndarray:
+    body = np.abs(close - open_)
+    full_range = high - low + 1e-10
+    lower_wick = np.minimum(open_, close) - low
+    return (lower_wick >= 2 * body) & (body / full_range < 0.4)
+
+
+@_njit(cache=True)
 def _shooting_star_nb(
     open_: np.ndarray, high: np.ndarray, low: np.ndarray, close: np.ndarray
 ) -> np.ndarray:
@@ -79,6 +125,22 @@ def _shooting_star_nb(
         upper_wick = high[i] - max(open_[i], close[i])
         result[i] = (upper_wick >= 2 * body) and (body / full_range < 0.4)
     return result
+
+
+def _shooting_star_pure(
+    open_: np.ndarray, high: np.ndarray, low: np.ndarray, close: np.ndarray
+) -> np.ndarray:
+    body = np.abs(close - open_)
+    full_range = high - low + 1e-10
+    upper_wick = high - np.maximum(open_, close)
+    return (upper_wick >= 2 * body) & (body / full_range < 0.4)
+
+
+# Dispatch: use numba when available, pure numpy otherwise
+_vwap = _vwap_nb if _HAS_NUMBA else _vwap_pure
+_consecutive_count = _consecutive_count_nb if _HAS_NUMBA else _consecutive_count_pure
+_hammer = _hammer_nb if _HAS_NUMBA else _hammer_pure
+_shooting_star = _shooting_star_nb if _HAS_NUMBA else _shooting_star_pure
 
 
 # ---------------------------------------------------------------------------
@@ -192,9 +254,9 @@ def _compute_raw(
         if ta is not None:
             return ta.willr(high, low, close, length=period or 14)
 
-    # --- VWAP / AVWAP (numba-accelerated) ---
+    # --- VWAP / AVWAP ---
     if name in ("VWAP", "AVWAP"):
-        vals = _vwap_nb(high.values, low.values, close.values, volume.values.astype(np.float64))
+        vals = _vwap(high.values, low.values, close.values, volume.values.astype(np.float64))
         return pd.Series(vals, index=close.index)
 
     # --- Level indicators (scalar values broadcast to series) ---
@@ -213,22 +275,22 @@ def _compute_raw(
     if name == "Yesterday Close":
         return pd.Series(ds.get("previous_close", np.nan), index=close.index)
 
-    # --- Custom computed (numba-accelerated consecutives) ---
+    # --- Custom computed (numba-accelerated when available) ---
     if name == "Accumulated Volume":
         return volume.cumsum().astype(float)
     if name == "Consecutive Red Candles":
         signal = (close.values < open_.values)
-        return pd.Series(_consecutive_count_nb(signal), index=close.index)
+        return pd.Series(_consecutive_count(signal), index=close.index)
     if name == "Consecutive Higher Highs":
         hh = np.empty(len(high), dtype=np.bool_)
         hh[0] = False
         hh[1:] = high.values[1:] > high.values[:-1]
-        return pd.Series(_consecutive_count_nb(hh), index=close.index)
+        return pd.Series(_consecutive_count(hh), index=close.index)
     if name == "Consecutive Lower Lows":
         ll = np.empty(len(low), dtype=np.bool_)
         ll[0] = False
         ll[1:] = low.values[1:] < low.values[:-1]
-        return pd.Series(_consecutive_count_nb(ll), index=close.index)
+        return pd.Series(_consecutive_count(ll), index=close.index)
 
     if name == "Ret % PM":
         pm_h = ds.get("pm_high", np.nan)
@@ -283,9 +345,9 @@ def detect_candle_pattern(
         full_range = high - low + 1e-10
         sig = (body / full_range) < 0.1
     elif pattern == "HAMMER":
-        sig = _hammer_nb(open_, high, low, close)
+        sig = _hammer(open_, high, low, close)
     elif pattern == "SHOOTING_STAR":
-        sig = _shooting_star_nb(open_, high, low, close)
+        sig = _shooting_star(open_, high, low, close)
     else:
         return pd.Series(False, index=idx)
 
