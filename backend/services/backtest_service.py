@@ -328,11 +328,15 @@ def _compute_global_equity_and_drawdown(
     values = np.concatenate(day_arrays)
 
     # #region agent log
-    import json as _json, os as _os
-    _log_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__))), ".cursor", "debug-d50eeb.log")
-    _payload = {"sessionId":"d50eeb","location":"backtest_service.py:_compute_global_equity_and_drawdown","message":"global equity post-fix values","hypothesisId":"post-fix","data":{"total_points":int(len(values)),"n_days":len(day_arrays),"first5_values":values[:5].tolist()},"timestamp":int(__import__("time").time()*1000)}
-    with open(_log_path, "a") as _f:
-        _f.write(_json.dumps(_payload) + "\n")
+    try:
+        import json as _json, os as _os
+        _log_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__))), ".cursor", "debug-d50eeb.log")
+        _payload = {"sessionId":"d50eeb","location":"backtest_service.py:_compute_global_equity_and_drawdown","message":"global equity post-fix values","hypothesisId":"post-fix","data":{"total_points":int(len(values)),"n_days":len(day_arrays),"first5_values":values[:5].tolist()},"timestamp":int(__import__("time").time()*1000)}
+        _os.makedirs(_os.path.dirname(_log_path), exist_ok=True)
+        with open(_log_path, "a") as _f:
+            _f.write(_json.dumps(_payload) + "\n")
+    except Exception:
+        pass
     # #endregion
 
     # Use sequential fake timestamps: global equity mixes multiple tickers on the
