@@ -1,7 +1,17 @@
-from fastapi import FastAPI
+import logging
+import time
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+
 from backend.routers import data, backtest
 from backend.config import ALLOWED_ORIGINS
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("backtester")
 
 app = FastAPI(title="BacktesterMVP", version="0.1.0")
 
@@ -15,6 +25,23 @@ app.add_middleware(
 
 app.include_router(data.router)
 app.include_router(backtest.router)
+
+
+@app.on_event("startup")
+def on_startup():
+    logger.info("=== BacktesterMVP starting ===")
+    logger.info(f"ALLOWED_ORIGINS = {ALLOWED_ORIGINS}")
+    from backend.services.indicators import _HAS_NUMBA
+    logger.info(f"Numba available: {_HAS_NUMBA}")
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.time()
+    response = await call_next(request)
+    elapsed = round(time.time() - start, 2)
+    logger.info(f"{request.method} {request.url.path} -> {response.status_code} ({elapsed}s)")
+    return response
 
 
 @app.get("/api/health")

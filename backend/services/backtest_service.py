@@ -9,7 +9,9 @@ Performance strategy:
   - Phase 4: Extract per-column results from batched portfolios
 """
 
+import logging
 import os
+import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -18,6 +20,8 @@ import pandas as pd
 import vectorbt as vbt
 
 from backend.services.strategy_engine import translate_strategy
+
+logger = logging.getLogger("backtester.engine")
 
 _MAX_WORKERS = int(os.getenv("BACKTEST_WORKERS", min(os.cpu_count() or 2, 4)))
 _MIN_BATCH_SIZE = 2
@@ -35,8 +39,13 @@ def run_backtest(
     Run backtest for each (ticker, date) pair independently.
     Returns aggregated metrics + per-day details.
     """
+    t_total = time.time()
     grouped = intraday_df.groupby(["ticker", "date"])
+    logger.info(f"[PHASE 0] groupby done, {grouped.ngroups} groups, workers={_MAX_WORKERS}")
+
+    t0 = time.time()
     qual_lookup = _build_qualifying_lookup(qualifying_df)
+    logger.info(f"[PHASE 0] qualifying lookup built ({round(time.time()-t0, 2)}s)")
 
     # Phase 1 — generate signals for all days in parallel
     signal_inputs = []
@@ -47,6 +56,8 @@ def run_backtest(
         daily_stats = qual_lookup.get((ticker, date), {})
         signal_inputs.append((ticker, str(date), day_df, daily_stats))
 
+    logger.info(f"[PHASE 1] generating signals for {len(signal_inputs)} days...")
+    t1 = time.time()
     prepared: list[tuple] = []
     with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
         future_map = {
@@ -62,13 +73,17 @@ def run_backtest(
             if not signals["entries"].any():
                 continue
             prepared.append((ticker, date, day_df, signals))
+    logger.info(f"[PHASE 1] signals done: {len(prepared)} days with entries ({round(time.time()-t1, 2)}s)")
 
     # Phase 2 — group by (bar_count, risk_params) for batching
+    t2 = time.time()
     batches: dict[tuple, list] = defaultdict(list)
     for item in prepared:
         _ticker, _date, _day_df, _signals = item
         key = _batch_key(_day_df, _signals)
         batches[key].append(item)
+    batch_sizes = [len(v) for v in batches.values()]
+    logger.info(f"[PHASE 2] {len(batches)} batch groups, sizes={batch_sizes} ({round(time.time()-t2, 2)}s)")
 
     all_trades: list[dict] = []
     all_candles: list[dict] = []
@@ -76,7 +91,10 @@ def run_backtest(
     day_results: list[dict] = []
 
     # Phase 3 + 4 — execute and extract
+    t3 = time.time()
+    batch_i = 0
     for batch_key, batch_items in batches.items():
+        tb = time.time()
         if len(batch_items) >= _MIN_BATCH_SIZE:
             results = _process_batch(batch_items, init_cash, fees, slippage, strategy_def)
         else:
@@ -84,6 +102,8 @@ def run_backtest(
                 _process_single_prepared(item, init_cash, fees, slippage, strategy_def)
                 for item in batch_items
             ]
+        batch_i += 1
+        logger.info(f"[PHASE 3] batch {batch_i}/{len(batches)} ({len(batch_items)} days) ({round(time.time()-tb, 2)}s)")
 
         for r in results:
             if r is None:
@@ -93,9 +113,17 @@ def run_backtest(
             all_trades.extend(trades)
             all_equity.append(equity)
             day_results.append(stats)
+    logger.info(f"[PHASE 3] all batches done ({round(time.time()-t3, 2)}s)")
 
+    t4 = time.time()
     aggregate = _aggregate_metrics(day_results, all_trades)
     global_eq, global_dd = _compute_global_equity_and_drawdown(all_equity, init_cash)
+    logger.info(f"[PHASE 4] aggregate+equity done ({round(time.time()-t4, 2)}s)")
+
+    logger.info(
+        f"[DONE] {len(day_results)} days, {len(all_trades)} trades, "
+        f"total={round(time.time()-t_total, 2)}s"
+    )
 
     return {
         "aggregate_metrics": aggregate,
