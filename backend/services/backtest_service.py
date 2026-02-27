@@ -9,8 +9,10 @@ Memory-optimised streaming architecture:
 
 import ctypes
 import gc
+import json
 import logging
 import os
+import resource
 import sys
 import time
 
@@ -21,6 +23,30 @@ import vectorbt as vbt
 from backend.services.strategy_engine import translate_strategy
 
 logger = logging.getLogger("backtester.engine")
+
+# #region agent log
+_DEBUG_LOG = os.path.join(os.path.dirname(__file__), '..', '..', '.cursor', 'debug-568c25.log')
+def _mem_mb():
+    try:
+        with open('/proc/self/status') as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    return int(line.split()[1]) / 1024
+    except Exception:
+        pass
+    ru = resource.getrusage(resource.RUSAGE_SELF)
+    return ru.ru_maxrss / (1024*1024) if sys.platform == "darwin" else ru.ru_maxrss / 1024
+def _dbg(msg, data=None, hyp="A"):
+    mem = round(_mem_mb(), 1)
+    data = data or {}
+    data["rss_mb"] = mem
+    logger.info(f"[DBG:{hyp}] {msg} | RSS={mem}MB | {data}")
+    try:
+        with open(_DEBUG_LOG, 'a') as f:
+            f.write(json.dumps({"sessionId":"568c25","location":"backtest_service.py","message":msg,"data":data,"timestamp":int(time.time()*1000),"hypothesisId":hyp})+'\n')
+    except Exception:
+        pass
+# #endregion
 
 _MAX_WORKERS = int(os.getenv("BACKTEST_WORKERS", "1"))
 _MIN_BATCH_SIZE = 2
@@ -51,6 +77,9 @@ def run_backtest(
                run Portfolio, collect results, free everything, malloc_trim.
     """
     t_total = time.time()
+    # #region agent log
+    _dbg("backtest_start", {"init_cash": init_cash, "intraday_rows": len(intraday_df)}, "A")
+    # #endregion
     grouped = intraday_df.groupby(["ticker", "date"])
     n_groups = grouped.ngroups
     logger.info(f"[INIT] groupby done, {n_groups} groups")
@@ -81,6 +110,9 @@ def run_backtest(
     gc.collect()
     _release_memory()
     logger.info(f"[INIT] extracted {len(day_items)} days to numpy, big DFs freed")
+    # #region agent log
+    _dbg("pass1_done_dfs_freed", {"n_days": len(day_items)}, "A")
+    # #endregion
 
     # --- Pass 2: signal generation + portfolio, one day at a time -----------
     all_trades: list[dict] = []
@@ -93,6 +125,10 @@ def run_backtest(
     for i in range(len(day_items)):
         ticker, date, arrays, daily_stats = day_items[i]
         day_items[i] = None
+        # #region agent log
+        if i % 5 == 0:
+            _dbg(f"pass2_day_{i}", {"ticker": ticker, "date": date, "bars": len(arrays["close"])}, "A")
+        # #endregion
 
         mini_df = pd.DataFrame(arrays)
 
@@ -148,6 +184,9 @@ def run_backtest(
         f"[STREAM] done: {days_with_entries} days with entries "
         f"({round(time.time()-t1, 2)}s)"
     )
+    # #region agent log
+    _dbg("pass2_done", {"days_with_entries": days_with_entries, "n_trades": len(all_trades)}, "A")
+    # #endregion
 
     t4 = time.time()
     aggregate = _aggregate_metrics(day_results, all_trades)
@@ -158,6 +197,9 @@ def run_backtest(
         f"[DONE] {len(day_results)} days, {len(all_trades)} trades, "
         f"total={round(time.time()-t_total, 2)}s"
     )
+    # #region agent log
+    _dbg("backtest_done", {"n_days": len(day_results), "n_trades": len(all_trades), "elapsed": round(time.time()-t_total,2)}, "A")
+    # #endregion
 
     return {
         "aggregate_metrics": aggregate,
