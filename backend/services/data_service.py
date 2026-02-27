@@ -110,11 +110,11 @@ def delete_dataset(dataset_id: str) -> bool:
 # Data fetching for backtest
 # ---------------------------------------------------------------------------
 
-def fetch_dataset_data(dataset_id: str) -> tuple[pd.DataFrame, list[tuple[str, str]]]:
+def fetch_dataset_data(dataset_id: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Returns:
         qualifying: daily stats from daily_metrics enriched with yesterday_high/low
-        pairs: list of (ticker, date) tuples for intraday batch fetching
+        intraday: raw 1m candles from intraday_1m (memory-optimised dtypes)
     """
     t0 = time.time()
 
@@ -145,48 +145,27 @@ def fetch_dataset_data(dataset_id: str) -> tuple[pd.DataFrame, list[tuple[str, s
     logger.info(f"qualifying query: {len(qualifying)} rows ({round(t_q - t0, 2)}s)")
 
     if qualifying.empty:
-        return qualifying, []
+        return qualifying, pd.DataFrame()
 
-    pairs_df = query_df(
-        "SELECT ticker, date FROM dataset_pairs WHERE dataset_id = ? ORDER BY ticker, date",
-        [dataset_id],
-    )
-    pairs = [(r["ticker"], str(r["date"])[:10]) for _, r in pairs_df.iterrows()]
-    logger.info(f"pairs fetched: {len(pairs)}")
-
-    return qualifying, pairs
-
-
-def fetch_intraday_batch(
-    dataset_id: str, pairs: list[tuple[str, str]]
-) -> pd.DataFrame:
-    """Fetch intraday candles for a specific batch of (ticker, date) pairs."""
-    if not pairs:
-        return pd.DataFrame()
-
-    import time as _t
-    t0 = _t.time()
-
-    values_clause = ", ".join(
-        f"('{t}', '{str(d)[:10]}')" for t, d in pairs
-    )
-    sql = f"""
+    intraday_sql = """
     SELECT i.ticker, i.date, i."timestamp", i.open, i.high, i.low,
            i."close", i.volume
     FROM intraday_1m i
-    WHERE (i.ticker, i.date) IN ({values_clause})
+    INNER JOIN dataset_pairs dp ON i.ticker = dp.ticker AND i.date = dp.date
+    WHERE dp.dataset_id = ?
     """
-    try:
-        df = query_df(sql)
-    except Exception as e:
-        logger.error(f"fetch_intraday_batch FAILED ({len(pairs)} pairs): {e}")
-        raise
+    intraday = query_df(intraday_sql, [dataset_id])
+    t_i = time.time()
+    logger.info(f"intraday query: {len(intraday)} rows ({round(t_i - t_q, 2)}s)")
 
     for col in ("open", "high", "low", "close"):
-        if col in df.columns:
-            df[col] = df[col].astype("float32")
-    if "volume" in df.columns:
-        df["volume"] = df["volume"].astype("int32")
+        if col in intraday.columns:
+            intraday[col] = intraday[col].astype("float32")
+    if "volume" in intraday.columns:
+        intraday["volume"] = intraday["volume"].astype("int32")
+    if "ticker" in intraday.columns:
+        intraday["ticker"] = intraday["ticker"].astype("category")
+    if "date" in intraday.columns:
+        intraday["date"] = intraday["date"].astype("category")
 
-    logger.info(f"intraday batch: {len(pairs)} pairs -> {len(df)} rows ({round(_t.time() - t0, 2)}s)")
-    return df
+    return qualifying, intraday
