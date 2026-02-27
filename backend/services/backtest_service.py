@@ -44,44 +44,78 @@ def run_backtest(
     slippage: float = 0.0,
 ) -> dict:
     """
-    Streaming backtest: iterate groupby once, process each day immediately,
-    never holding more than one day's data + one Portfolio in memory.
+    Two-pass low-memory backtest:
+      Pass 1 – extract every (ticker,date) group to lightweight numpy dicts,
+               then DELETE the big 143K-row DataFrame.
+      Pass 2 – for each day, rebuild a tiny DataFrame, generate signals,
+               run Portfolio, collect results, free everything, malloc_trim.
     """
     t_total = time.time()
     grouped = intraday_df.groupby(["ticker", "date"])
     n_groups = grouped.ngroups
     logger.info(f"[INIT] groupby done, {n_groups} groups")
 
-    t0 = time.time()
     qual_lookup = _build_qualifying_lookup(qualifying_df)
-    del qualifying_df
-    logger.info(f"[INIT] qualifying lookup built ({round(time.time()-t0, 2)}s)")
 
+    # --- Pass 1: extract to numpy, ~7 MB for 176 days ----------------------
+    day_items: list[tuple | None] = []
+    for (ticker, date), day_df in grouped:
+        day_df = day_df.sort_values("timestamp").reset_index(drop=True)
+        if len(day_df) < 5:
+            continue
+        day_items.append((
+            ticker,
+            str(date),
+            {
+                "open": day_df["open"].values,
+                "high": day_df["high"].values,
+                "low": day_df["low"].values,
+                "close": day_df["close"].values,
+                "volume": day_df["volume"].values,
+                "timestamp": day_df["timestamp"].values,
+            },
+            qual_lookup.get((ticker, date), {}),
+        ))
+
+    del grouped, intraday_df, qualifying_df, qual_lookup
+    gc.collect()
+    _release_memory()
+    logger.info(f"[INIT] extracted {len(day_items)} days to numpy, big DFs freed")
+
+    # --- Pass 2: signal generation + portfolio, one day at a time -----------
     all_trades: list[dict] = []
     all_candles: list[dict] = []
     all_equity: list[dict] = []
     day_results: list[dict] = []
-
     days_with_entries = 0
     t1 = time.time()
 
-    for i, ((ticker, date), day_df) in enumerate(grouped):
-        day_df = day_df.sort_values("timestamp").reset_index(drop=True)
-        if len(day_df) < 5:
-            continue
+    for i in range(len(day_items)):
+        ticker, date, arrays, daily_stats = day_items[i]
+        day_items[i] = None
 
-        daily_stats = qual_lookup.get((ticker, date), {})
+        mini_df = pd.DataFrame(arrays)
 
         try:
-            signals = translate_strategy(day_df, strategy_def, daily_stats)
+            signals = translate_strategy(mini_df, strategy_def, daily_stats)
         except Exception:
+            del mini_df
             continue
         if not signals["entries"].any():
-            del signals
+            del mini_df, signals
             continue
 
-        slim = _slim_item(ticker, str(date), day_df, signals)
-        del day_df, signals
+        slim_signals = {
+            "entries": signals["entries"].values if hasattr(signals["entries"], "values") else signals["entries"],
+            "exits": signals["exits"].values if hasattr(signals["exits"], "values") else signals["exits"],
+            "sl_stop": signals["sl_stop"],
+            "sl_trail": signals["sl_trail"],
+            "tp_stop": signals["tp_stop"],
+            "direction": signals["direction"],
+            "accept_reentries": signals.get("accept_reentries", False),
+        }
+        slim = (ticker, date, arrays, slim_signals)
+        del mini_df, signals, arrays, daily_stats
 
         try:
             r = _process_single_prepared(slim, init_cash, fees, slippage, strategy_def)
@@ -98,21 +132,21 @@ def run_backtest(
             day_results.append(stats)
             days_with_entries += 1
 
-            gc.collect()
-            _release_memory()
-
             if days_with_entries % 10 == 0:
                 logger.info(
                     f"[STREAM] {days_with_entries} days processed, "
-                    f"{i+1}/{n_groups} scanned ({round(time.time()-t1, 2)}s)"
+                    f"{i+1}/{len(day_items)} scanned ({round(time.time()-t1, 2)}s)"
                 )
 
-    del grouped, qual_lookup, intraday_df
+        gc.collect()
+        _release_memory()
+
+    del day_items
     gc.collect()
     _release_memory()
     logger.info(
         f"[STREAM] done: {days_with_entries} days with entries "
-        f"out of {n_groups} ({round(time.time()-t1, 2)}s)"
+        f"({round(time.time()-t1, 2)}s)"
     )
 
     t4 = time.time()
