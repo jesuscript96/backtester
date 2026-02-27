@@ -9,6 +9,7 @@ Memory-optimised streaming architecture:
 
 import ctypes
 import gc
+import json
 import logging
 import sys
 import time
@@ -20,6 +21,30 @@ from backend.services.strategy_engine import translate_strategy
 from backend.services.portfolio_sim import simulate
 
 logger = logging.getLogger("backtester.engine")
+
+# #region agent log helpers (debug-d20cd9)
+_DBG_LOG = "/Users/jvch/Desktop/AutomatoWebs/BacktesterMVP/.cursor/debug-d20cd9.log"
+
+
+def _rss_mb() -> float:
+    try:
+        import resource
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return round(rss / 1024, 1) if sys.platform == "linux" else round(rss / 1024 / 1024, 1)
+    except Exception:
+        return -1.0
+
+
+def _dbg(location: str, message: str, data: dict, hyp: str):
+    entry = {"sessionId": "d20cd9", "timestamp": int(time.time() * 1000),
+             "location": location, "message": message, "data": data, "hypothesisId": hyp}
+    logger.info(f"[DBG-{hyp}] {message} | {data}")
+    try:
+        with open(_DBG_LOG, "a") as _f:
+            _f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+# #endregion
 
 
 
@@ -44,6 +69,9 @@ def run_backtest(
     grouped = intraday_df.groupby(["ticker", "date"])
     n_groups = grouped.ngroups
     logger.info(f"[INIT] groupby done, {n_groups} groups")
+    # #region agent log (debug-d20cd9)
+    _dbg("backtest_service.py:run_backtest:groupby", "after groupby", {"n_groups": n_groups, "rss_mb": _rss_mb(), "intraday_rows": len(intraday_df)}, "H-B")
+    # #endregion
 
     qual_lookup = _build_qualifying_lookup(qualifying_df)
 
@@ -70,6 +98,9 @@ def run_backtest(
     gc.collect()
     _release_memory()
     logger.info(f"[INIT] extracted {len(day_items)} days to numpy, big DFs freed")
+    # #region agent log (debug-d20cd9)
+    _dbg("backtest_service.py:run_backtest:extracted", "after DF freed", {"n_days": len(day_items), "rss_mb": _rss_mb()}, "H-B")
+    # #endregion
 
     all_trades: list[dict] = []
     all_candles: list[dict] = []
@@ -157,6 +188,13 @@ def run_backtest(
                 f"[STREAM] {days_with_entries} days processed, "
                 f"{i+1}/{len(day_items)} scanned ({round(time.time()-t1, 2)}s)"
             )
+            # #region agent log (debug-d20cd9)
+            _dbg("backtest_service.py:stream_loop", "stream progress", {
+                "days_with_entries": days_with_entries, "scanned": i + 1,
+                "rss_mb": _rss_mb(), "n_trades": len(all_trades),
+                "n_candles": len(all_candles), "elapsed_s": round(time.time() - t1, 2)
+            }, "H-A")
+            # #endregion
 
     del day_items
     gc.collect()
@@ -165,11 +203,25 @@ def run_backtest(
         f"[STREAM] done: {days_with_entries} days with entries "
         f"({round(time.time()-t1, 2)}s)"
     )
+    # #region agent log (debug-d20cd9)
+    _dbg("backtest_service.py:stream_done", "stream loop finished", {
+        "days_with_entries": days_with_entries, "total_trades": len(all_trades),
+        "total_candles": len(all_candles), "rss_mb": _rss_mb(),
+        "elapsed_s": round(time.time() - t1, 2)
+    }, "H-A")
+    # #endregion
 
     t4 = time.time()
     aggregate = _aggregate_metrics(day_results, all_trades)
     global_eq, global_dd = _compute_global_equity_and_drawdown(all_trades, init_cash)
     logger.info(f"[AGG] aggregate+equity done ({round(time.time()-t4, 2)}s)")
+    # #region agent log (debug-d20cd9)
+    _dbg("backtest_service.py:before_return", "about to return result", {
+        "rss_mb": _rss_mb(), "n_day_results": len(day_results),
+        "n_all_trades": len(all_trades), "n_all_candles": len(all_candles),
+        "n_all_equity": len(all_equity), "total_elapsed_s": round(time.time() - t_total, 2)
+    }, "H-C")
+    # #endregion
 
     logger.info(
         f"[DONE] {len(day_results)} days, {len(all_trades)} trades, "
