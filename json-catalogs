@@ -1,0 +1,151 @@
+# Catálogo de Estructuras JSON: BTT
+
+Este documento proporciona una referencia técnica completa de los esquemas JSON utilizados para configurar Estrategias y Filtros (Saved Queries) en la plataforma BTT.
+
+---
+
+## 1. Catálogo de Estrategia ([Strategy](file:///Users/jvch/Desktop/AutomatoWebs/BTT/backend/app/schemas/strategy.py#154-158))
+
+El JSON de una estrategia define su comportamiento operativo, criterios de entrada/salida y gestión de riesgo.
+
+### Estructura Principal
+```json
+{
+  "name": "Nombre de la Estrategia",
+  "description": "Descripción opcional",
+  "bias": "long", // "long" o "short"
+  "entry_logic": {
+    "timeframe": "1m", // "1m", "5m", "15m", "30m", "1h", "1d"
+    "root_condition": { /* ConditionGroup */ }
+  },
+  "exit_logic": {
+    "timeframe": "1m",
+    "root_condition": { /* ConditionGroup */ }
+  },
+  "risk_management": {
+    "use_hard_stop": true,
+    "use_take_profit": true,
+    "accept_reentries": true,
+    "hard_stop": { "type": "Percentage", "value": 2.0 },
+    "take_profit": { "type": "Percentage", "value": 6.0 },
+    "trailing_stop": { "active": false, "type": "Percentage", "buffer_pct": 0.5 },
+    "max_drawdown_daily": null
+  },
+  "universe_filters": {
+    "min_market_cap": null,
+    "max_market_cap": null,
+    "min_price": null,
+    "max_price": null,
+    "min_volume": null,
+    "max_shares_float": null,
+    "require_shortable": true,
+    "exclude_dilution": true,
+    "whitelist_sectors": []
+  }
+}
+```
+
+### Componentes Lógicos ([ConditionGroup](file:///Users/jvch/Desktop/AutomatoWebs/BTT/backend/app/schemas/strategy.py#123-127) y `Conditions`)
+Las condiciones pueden anidarse usando grupos con operadores `AND` / `OR`.
+
+#### A. Comparación de Indicadores (`indicator_comparison`)
+```json
+{
+  "type": "indicator_comparison",
+  "source": {
+    "name": "SMA",
+    "period": 20,
+    "offset": 0
+  },
+  "comparator": "GREATER_THAN", // Ver tabla de comparadores
+  "target": {
+    "name": "EMA",
+    "period": 50
+  } // O puede ser un número estático: 70.0
+}
+```
+
+#### B. Distancia a Nivel de Precios (`price_level_distance`)
+```json
+{
+  "type": "price_level_distance",
+  "source": "Close", // "Close", "High", "Low"
+  "level": "Pre-Market High", // Ver tabla de indicadores de nivel
+  "comparator": "DISTANCE_LESS_THAN",
+  "value_pct": 1.5 // Distancia máxima del 1.5%
+}
+```
+
+#### C. Patrones de Velas ([candle_pattern](file:///Users/jvch/Desktop/AutomatoWebs/BTT/backend/app/backtester/engine.py#779-816))
+```json
+{
+  "type": "candle_pattern",
+  "pattern": "GREEN_VOLUME_PLUS", // Ver tabla de patrones
+  "lookback": 1,
+  "consecutive_count": 3
+}
+```
+
+### Tablas de Referencia (Enums)
+
+| Categoría | Valores Disponibles |
+| :--- | :--- |
+| **Indicadores** | `SMA`, `EMA`, `WMA`, `VWAP`, `AVWAP`, `RSI`, `MACD`, `ATR`, `ADX`, `Williams %R`, `Close`, `Open`, `High`, `Low`, `Pre-Market High`, `Pre-Market Low`, `High of Day`, `Low of Day`, `Yesterday High`, `Yesterday Low`, `Yesterday Close`, `Volume`, `Accumulated Volume`, `Consecutive Red Candles`, `Consecutive Higher Highs`, `Consecutive Lower Lows`, `Ret % PM`, `Ret % RTH`, `Ret % AM`, `Time of Day`, `Max N Bars`, `Custom` |
+| **Comparadores** | `GREATER_THAN`, `LESS_THAN`, `GREATER_THAN_OR_EQUAL`, `LESS_THAN_OR_EQUAL`, `EQUAL`, `CROSSES_ABOVE`, `CROSSES_BELOW`, `DISTANCE_GREATER_THAN`, `DISTANCE_LESS_THAN` |
+| **Patrones** | `RED_VOLUME`, `RED_VOLUME_PLUS`, `GREEN_VOLUME`, `GREEN_VOLUME_PLUS`, `DOJI`, `HAMMER`, `SHOOTING_STAR` |
+| **Riesgo (Tipos)** | `Fixed Amount`, `Percentage`, `ATR Multiplier`, `Market Structure (HOD/LOD)` |
+
+---
+
+## 2. Catálogo de Filtros ([SavedQuery](file:///Users/jvch/Desktop/AutomatoWebs/BTT/backend/app/routers/query.py#11-17))
+
+Un [SavedQuery](file:///Users/jvch/Desktop/AutomatoWebs/BTT/backend/app/routers/query.py#11-17) almacena la configuración de filtros para la selección del universo de mercado.
+
+### Estructura Principal
+```json
+{
+  "name": "Nombre del Dataset",
+  "filters": {
+    "date_from": "2024-01-01",
+    "date_to": "2025-12-31",
+    "ticker": null,
+    "min_gap_pct": 2.5,
+    "max_gap_pct": null,
+    "min_rth_volume": 1000000,
+    "min_m15_ret_pct": null,
+    "max_m15_ret_pct": null,
+    "min_rth_run_pct": null,
+    "max_rth_run_pct": null,
+    "min_high_spike_pct": null,
+    "max_high_spike_pct": null,
+    "min_low_spike_pct": null,
+    "max_low_spike_pct": null,
+    "hod_after": "10:30",
+    "lod_before": null,
+    "rules": [ /* Lista de FilterRule */ ]
+  }
+}
+```
+
+### Reglas Dinámicas ([FilterRule](file:///Users/jvch/Desktop/AutomatoWebs/BTT/backend/app/routers/data.py#12-19))
+Permiten comparaciones personalizadas entre métricas.
+```json
+{
+  "id": "uuid-v4",
+  "category": "Price",
+  "metric": "Open Gap %", // Ver catálogo de métricas
+  "operator": ">", // "=", "!=", ">", ">=", "<", "<="
+  "valueType": "static", // "static" (número) o "variable" (otra métrica)
+  "value": "5.0"
+}
+```
+
+### Catálogo de Métricas para Reglas
+Estas son las claves permitidas en el campo [metric](file:///Users/jvch/Desktop/AutomatoWebs/BTT/backend/app/routers/data.py#74-198) de una regla:
+
+*   **Precios**: `Open Price`, `Close Price`, `High Price`, `Low Price`, `Previous Close`.
+*   **Volumen**: `EOD Volume`, `Premarket Volume`.
+*   **Rendimiento**: `Open Gap %`, `RTH Run %`, `PMH Fade to Open %`, `High Spike %`, `Low Spike %`, `RTH Fade To Close %`, `Day Return %`.
+*   **Intradía (M15-M60)**: `M15 Return %`, `M30 Return %`, `M60 Return %`, `M15 High Spike %`, `M30 High Spike %`, `M60 High Spike %`, `M15 Low Spike %`, `M30 Low Spike %`, `M60 Low Spike %`.
+*   **Retornos a Cierre**: `Return M15 to Close %`, `Return M30 to Close %`, `Return M60 to Close %`.
+*   **Otros**: `PMH Gap %`, `RTH Range %`.

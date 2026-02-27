@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: backtester-api
+    runtime: python
+    region: oregon
+    plan: starter
+    rootDir: .
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: gunicorn backend.main:app --workers 2 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --timeout 300
+    envVars:
+      - key: MOTHERDUCK_TOKEN
+        sync: false
+      - key: MOTHERDUCK_DB
+        value: Massive
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.13.0"
