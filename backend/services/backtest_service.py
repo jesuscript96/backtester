@@ -57,6 +57,9 @@ def run_backtest(
         daily_stats = qual_lookup.get((ticker, date), {})
         signal_inputs.append((ticker, str(date), day_df, daily_stats))
 
+    del grouped, qual_lookup, intraday_df, qualifying_df
+    gc.collect()
+
     logger.info(f"[PHASE 1] generating signals for {len(signal_inputs)} days (workers={_MAX_WORKERS})...")
     t1 = time.time()
     prepared: list[tuple] = []
@@ -69,7 +72,7 @@ def run_backtest(
                 continue
             if not signals["entries"].any():
                 continue
-            prepared.append((ticker, date, day_df, signals))
+            prepared.append(_slim_item(ticker, date, day_df, signals))
             if (i + 1) % 25 == 0:
                 logger.info(f"[PHASE 1] ... {i+1}/{len(signal_inputs)} done ({round(time.time()-t1, 2)}s)")
     else:
@@ -86,14 +89,14 @@ def run_backtest(
                     continue
                 if not signals["entries"].any():
                     continue
-                prepared.append((ticker, date, day_df, signals))
+                prepared.append(_slim_item(ticker, date, day_df, signals))
 
     logger.info(f"[PHASE 1] signals done: {len(prepared)} days with entries ({round(time.time()-t1, 2)}s)")
 
-    del grouped, signal_inputs
+    del signal_inputs
     gc.collect()
 
-    # Phase 2 — skip batching, process each day individually to minimise peak RAM
+    # Phase 2 — process each day individually to minimise peak RAM
     all_trades: list[dict] = []
     all_candles: list[dict] = []
     all_equity: list[dict] = []
@@ -103,13 +106,17 @@ def run_backtest(
     logger.info(f"[PHASE 2] processing {total_days} days one-by-one (low-memory mode)")
 
     t3 = time.time()
-    for i, item in enumerate(prepared):
+    for i in range(len(prepared)):
+        item = prepared[i]
+        prepared[i] = None
+
         try:
             r = _process_single_prepared(item, init_cash, fees, slippage, strategy_def)
         except Exception as exc:
             logger.warning(f"[PHASE 2] day {i+1} failed: {exc}")
             r = None
 
+        del item
         if r is not None:
             candles, trades, equity, stats = r
             all_candles.append(candles)
@@ -159,12 +166,34 @@ def _build_qualifying_lookup(qualifying_df: pd.DataFrame) -> dict:
     return lookup
 
 
-def _batch_key(day_df: pd.DataFrame, signals: dict) -> tuple:
+def _slim_item(ticker: str, date: str, day_df: pd.DataFrame, signals: dict) -> tuple:
+    """Convert DataFrame + signals to lightweight numpy-only tuple."""
+    day_data = {
+        "close": day_df["close"].values,
+        "open": day_df["open"].values,
+        "high": day_df["high"].values,
+        "low": day_df["low"].values,
+        "volume": day_df["volume"].values,
+        "timestamp": day_df["timestamp"].values,
+    }
+    slim_signals = {
+        "entries": signals["entries"].values if hasattr(signals["entries"], "values") else signals["entries"],
+        "exits": signals["exits"].values if hasattr(signals["exits"], "values") else signals["exits"],
+        "sl_stop": signals["sl_stop"],
+        "sl_trail": signals["sl_trail"],
+        "tp_stop": signals["tp_stop"],
+        "direction": signals["direction"],
+        "accept_reentries": signals.get("accept_reentries", False),
+    }
+    return (ticker, date, day_data, slim_signals)
+
+
+def _batch_key(day_data: dict, signals: dict) -> tuple:
     """Grouping key for compatible days that can share one Portfolio call."""
     sl = signals["sl_stop"]
     tp = signals["tp_stop"]
     return (
-        len(day_df),
+        len(day_data["close"]),
         signals["direction"],
         round(sl, 8) if sl is not None else None,
         signals["sl_trail"],
@@ -195,13 +224,13 @@ def _process_batch(
     high_dict = {}
     low_dict = {}
 
-    for col, (_t, _d, day_df, signals) in zip(col_names, batch_items):
-        close_dict[col] = day_df["close"].values
-        open_dict[col] = day_df["open"].values
-        high_dict[col] = day_df["high"].values
-        low_dict[col] = day_df["low"].values
-        entries_dict[col] = signals["entries"].values
-        exits_dict[col] = signals["exits"].values
+    for col, (_t, _d, day_data, signals) in zip(col_names, batch_items):
+        close_dict[col] = day_data["close"]
+        open_dict[col] = day_data["open"]
+        high_dict[col] = day_data["high"]
+        low_dict[col] = day_data["low"]
+        entries_dict[col] = signals["entries"]
+        exits_dict[col] = signals["exits"]
 
     pf_kwargs: dict = {
         "close": pd.DataFrame(close_dict),
@@ -235,45 +264,42 @@ def _process_batch(
             for item in batch_items
         ]
 
-    # Extract per-column results
     try:
         all_records = pf.trades.records_readable
     except Exception:
         all_records = pd.DataFrame()
 
     equity_df = pf.value()
+    del pf
 
     results: list[tuple | None] = []
-    for col, (ticker, date, day_df, signals) in zip(col_names, batch_items):
-        timestamps = pd.to_datetime(day_df["timestamp"])
+    for col, (ticker, date, day_data, signals) in zip(col_names, batch_items):
+        timestamps = pd.to_datetime(day_data["timestamp"])
+        n_bars = len(day_data["close"])
 
-        # Candles
         ts_epoch = (timestamps.astype("int64") // 10**9).values
         candle_df = pd.DataFrame({
             "time": ts_epoch.astype(int),
-            "open": day_df["open"].values.astype(float),
-            "high": day_df["high"].values.astype(float),
-            "low": day_df["low"].values.astype(float),
-            "close": day_df["close"].values.astype(float),
-            "volume": day_df["volume"].values.astype(int),
+            "open": day_data["open"].astype(float),
+            "high": day_data["high"].astype(float),
+            "low": day_data["low"].astype(float),
+            "close": day_data["close"].astype(float),
+            "volume": day_data["volume"].astype(int),
         })
         candles_dict = {"ticker": ticker, "date": date, "candles": candle_df.to_dict(orient="records")}
 
-        # Trades from batch records
         if not all_records.empty and "Column" in all_records.columns:
             col_records = all_records[all_records["Column"] == col]
         else:
             col_records = pd.DataFrame()
         trades_records = _extract_trades_from_records(
-            col_records, timestamps, ticker, date, strategy_def, len(day_df)
+            col_records, timestamps, ticker, date, strategy_def, n_bars
         )
 
-        # Equity from batch equity DataFrame
         col_equity_vals = equity_df[col].values if col in equity_df.columns else np.array([])
         equity = _extract_equity_from_values(col_equity_vals, timestamps)
         equity_dict = {"ticker": ticker, "date": date, "equity": equity}
 
-        # Stats
         stats = _extract_day_stats_from_values(col_equity_vals, ticker, date, trades_records)
 
         results.append((candles_dict, trades_records, equity_dict, stats))
@@ -292,25 +318,20 @@ def _process_single_prepared(
     slippage: float,
     strategy_def: dict,
 ) -> tuple | None:
-    """Process a single prepared (ticker, date, day_df, signals)."""
-    ticker, date, day_df, signals = item
+    """Process a single prepared (ticker, date, day_data, signals)."""
+    ticker, date, day_data, signals = item
 
-    entries = signals["entries"]
-    exits = signals["exits"]
-    sl_stop = signals["sl_stop"]
-    sl_trail = signals["sl_trail"]
-    tp_stop = signals["tp_stop"]
-
-    close = day_df["close"].values
-    open_ = day_df["open"].values
-    high = day_df["high"].values
-    low = day_df["low"].values
-    timestamps = pd.to_datetime(day_df["timestamp"])
+    close = day_data["close"]
+    open_ = day_data["open"]
+    high = day_data["high"]
+    low = day_data["low"]
+    timestamps = pd.to_datetime(day_data["timestamp"])
+    n_bars = len(close)
 
     pf_kwargs: dict = {
         "close": pd.Series(close, name="close"),
-        "entries": entries.values,
-        "exits": exits.values,
+        "entries": signals["entries"],
+        "exits": signals["exits"],
         "direction": signals["direction"],
         "init_cash": init_cash,
         "fees": fees,
@@ -321,12 +342,13 @@ def _process_single_prepared(
         "freq": "1min",
     }
 
+    sl_stop = signals["sl_stop"]
     if sl_stop is not None:
         pf_kwargs["sl_stop"] = sl_stop
-        if sl_trail:
+        if signals["sl_trail"]:
             pf_kwargs["sl_trail"] = True
-    if tp_stop is not None:
-        pf_kwargs["tp_stop"] = tp_stop
+    if signals["tp_stop"] is not None:
+        pf_kwargs["tp_stop"] = signals["tp_stop"]
     if not signals.get("accept_reentries", False):
         pf_kwargs["accumulate"] = False
 
@@ -342,7 +364,7 @@ def _process_single_prepared(
         "high": high.astype(float),
         "low": low.astype(float),
         "close": close.astype(float),
-        "volume": day_df["volume"].values.astype(int),
+        "volume": day_data["volume"].astype(int),
     })
     candles_dict = {"ticker": ticker, "date": date, "candles": candle_df.to_dict(orient="records")}
 
@@ -352,10 +374,12 @@ def _process_single_prepared(
         records = pd.DataFrame()
 
     trades_records = _extract_trades_from_records(
-        records, timestamps, ticker, date, strategy_def, len(day_df)
+        records, timestamps, ticker, date, strategy_def, n_bars
     )
 
     eq_vals = np.asarray(pf.value(), dtype=np.float64)
+    del pf
+
     equity = _extract_equity_from_values(eq_vals, timestamps)
     equity_dict = {"ticker": ticker, "date": date, "equity": equity}
 
@@ -507,14 +531,21 @@ def _compute_r_multiples_vec(
 # Equity extraction (vectorized)
 # ---------------------------------------------------------------------------
 
+_MAX_EQUITY_POINTS = 100
+
+
 def _extract_equity_from_values(eq_vals: np.ndarray, timestamps: pd.Series) -> list[dict]:
-    """Build equity list[dict] from a numpy array of equity values."""
+    """Build equity list[dict] from a numpy array of equity values, downsampled if large."""
     try:
         n = min(len(eq_vals), len(timestamps))
         if n == 0:
             return []
         ts_epoch = (timestamps.iloc[:n].astype("int64") // 10**9).values.astype(int)
         vals = eq_vals[:n].astype(np.float64)
+        if n > _MAX_EQUITY_POINTS:
+            idx = np.linspace(0, n - 1, _MAX_EQUITY_POINTS, dtype=int)
+            ts_epoch = ts_epoch[idx]
+            vals = vals[idx]
         return [{"time": int(t), "value": float(v)} for t, v in zip(ts_epoch, vals)]
     except Exception:
         return []

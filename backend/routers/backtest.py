@@ -1,3 +1,4 @@
+import gc
 import logging
 import time
 
@@ -74,6 +75,9 @@ def run_backtest_endpoint(req: BacktestRequest):
             fees=req.fees,
             slippage=req.slippage,
         )
+        del intraday, qualifying
+        gc.collect()
+
         bt_elapsed = round(time.time() - t_bt, 2)
         total_elapsed = round(time.time() - t0, 2)
         n_trades = len(results.get("trades", []))
