@@ -37,6 +37,14 @@ def translate_strategy(
 
     entry_df = _resample_if_needed(df, entry_tf)
     exit_df = _resample_if_needed(df, exit_tf)
+    # #region agent log
+    import json as _json6d, time as _time6d
+    try:
+        with open('/Users/jvch/Desktop/AutomatoWebs/BacktesterMVP/.cursor/debug-6a6030.log','a') as _f6d:
+            _f6d.write(_json6d.dumps({"sessionId":"6a6030","location":"strategy_engine.py:translate_strategy","message":"df_index_types","data":{"entry_tf":entry_tf,"exit_tf":exit_tf,"entry_df_index_type":str(type(entry_df.index)),"exit_df_index_type":str(type(exit_df.index)),"df_index_type":str(type(df.index))},"timestamp":int(_time6d.time()*1000),"hypothesisId":"C"})+'\n')
+    except Exception:
+        pass
+    # #endregion
 
     entry_cache: dict = {}
     exit_cache: dict = entry_cache if entry_tf == exit_tf else {}

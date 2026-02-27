@@ -163,6 +163,14 @@ def run_backtest(
             continue
 
         timestamps = pd.to_datetime(arrays["timestamp"])
+        # #region agent log
+        import json as _json6a, time as _time6a
+        try:
+            with open('/Users/jvch/Desktop/AutomatoWebs/BacktesterMVP/.cursor/debug-6a6030.log','a') as _f6a:
+                _f6a.write(_json6a.dumps({"sessionId":"6a6030","location":"backtest_service.py:165","message":"timestamps_type_after_to_datetime","data":{"type":str(type(timestamps)),"has_iloc":hasattr(timestamps,'iloc'),"len":len(timestamps)},"timestamp":int(_time6a.time()*1000),"hypothesisId":"A"})+'\n')
+        except Exception:
+            pass
+        # #endregion
         ts_epoch = (timestamps.astype("int64") // 10**9).values
 
         candles_dict = {
@@ -266,6 +274,14 @@ def _enrich_trades(
         return []
 
     max_idx = len(timestamps) - 1
+    # #region agent log
+    import json as _json6b, time as _time6b
+    try:
+        with open('/Users/jvch/Desktop/AutomatoWebs/BacktesterMVP/.cursor/debug-6a6030.log','a') as _f6b:
+            _f6b.write(_json6b.dumps({"sessionId":"6a6030","location":"backtest_service.py:_enrich_trades","message":"enrich_trades_timestamps_type","data":{"type":str(type(timestamps)),"has_iloc":hasattr(timestamps,'iloc'),"max_idx":max_idx,"n_trades":len(raw_trades)},"timestamp":int(_time6b.time()*1000),"hypothesisId":"A"})+'\n')
+    except Exception:
+        pass
+    # #endregion
     result = []
     for t in raw_trades:
         ei = min(t["entry_idx"], max_idx)
@@ -329,6 +345,14 @@ def _extract_equity_from_values(eq_vals: np.ndarray, timestamps: pd.Series) -> l
         n = min(len(eq_vals), len(timestamps))
         if n == 0:
             return []
+        # #region agent log
+        import json as _json6c, time as _time6c
+        try:
+            with open('/Users/jvch/Desktop/AutomatoWebs/BacktesterMVP/.cursor/debug-6a6030.log','a') as _f6c:
+                _f6c.write(_json6c.dumps({"sessionId":"6a6030","location":"backtest_service.py:_extract_equity","message":"extract_equity_timestamps_type","data":{"type":str(type(timestamps)),"has_iloc":hasattr(timestamps,'iloc'),"n":n},"timestamp":int(_time6c.time()*1000),"hypothesisId":"B"})+'\n')
+        except Exception:
+            pass
+        # #endregion
         ts_epoch = (timestamps.iloc[:n].astype("int64") // 10**9).values.astype(int)
         vals = eq_vals[:n].astype(np.float64)
         if n > _MAX_EQUITY_POINTS:
