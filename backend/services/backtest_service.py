@@ -93,46 +93,36 @@ def run_backtest(
     del grouped, signal_inputs
     gc.collect()
 
-    # Phase 2 — group by (bar_count, risk_params) for batching
-    t2 = time.time()
-    batches: dict[tuple, list] = defaultdict(list)
-    for item in prepared:
-        _ticker, _date, _day_df, _signals = item
-        key = _batch_key(_day_df, _signals)
-        batches[key].append(item)
-    del prepared
-    batch_sizes = [len(v) for v in batches.values()]
-    logger.info(f"[PHASE 2] {len(batches)} batch groups, sizes={batch_sizes} ({round(time.time()-t2, 2)}s)")
-
+    # Phase 2 — skip batching, process each day individually to minimise peak RAM
     all_trades: list[dict] = []
     all_candles: list[dict] = []
     all_equity: list[dict] = []
     day_results: list[dict] = []
 
-    # Phase 3 + 4 — execute and extract
-    t3 = time.time()
-    batch_i = 0
-    for batch_key, batch_items in batches.items():
-        tb = time.time()
-        if len(batch_items) >= _MIN_BATCH_SIZE:
-            results = _process_batch(batch_items, init_cash, fees, slippage, strategy_def)
-        else:
-            results = [
-                _process_single_prepared(item, init_cash, fees, slippage, strategy_def)
-                for item in batch_items
-            ]
-        batch_i += 1
-        logger.info(f"[PHASE 3] batch {batch_i}/{len(batches)} ({len(batch_items)} days) ({round(time.time()-tb, 2)}s)")
+    total_days = len(prepared)
+    logger.info(f"[PHASE 2] processing {total_days} days one-by-one (low-memory mode)")
 
-        for r in results:
-            if r is None:
-                continue
+    t3 = time.time()
+    for i, item in enumerate(prepared):
+        try:
+            r = _process_single_prepared(item, init_cash, fees, slippage, strategy_def)
+        except Exception as exc:
+            logger.warning(f"[PHASE 2] day {i+1} failed: {exc}")
+            r = None
+
+        if r is not None:
             candles, trades, equity, stats = r
             all_candles.append(candles)
             all_trades.extend(trades)
             all_equity.append(equity)
             day_results.append(stats)
-    logger.info(f"[PHASE 3] all batches done ({round(time.time()-t3, 2)}s)")
+
+        if (i + 1) % 10 == 0 or (i + 1) == total_days:
+            gc.collect()
+            logger.info(f"[PHASE 2] {i+1}/{total_days} done ({round(time.time()-t3, 2)}s)")
+
+    del prepared
+    logger.info(f"[PHASE 2] all days done ({round(time.time()-t3, 2)}s)")
 
     t4 = time.time()
     aggregate = _aggregate_metrics(day_results, all_trades)
