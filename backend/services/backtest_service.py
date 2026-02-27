@@ -19,6 +19,7 @@ import pandas as pd
 
 from backend.services.strategy_engine import translate_strategy
 from backend.services.portfolio_sim import simulate
+from backend.services.data_service import fetch_intraday_batch
 
 logger = logging.getLogger("backtester.engine")
 
@@ -56,8 +57,12 @@ def _release_memory():
             pass
 
 
+_BATCH_SIZE = 100
+
+
 def run_backtest(
-    intraday_df: pd.DataFrame,
+    dataset_id: str,
+    pairs: list[tuple[str, str]],
     qualifying_df: pd.DataFrame,
     strategy_def: dict,
     init_cash: float = 10000.0,
@@ -66,15 +71,15 @@ def run_backtest(
     slippage: float = 0.0,
 ) -> dict:
     t_total = time.time()
+    n_pairs = len(pairs)
+    logger.info(f"[INIT] {n_pairs} pairs, batch_size={_BATCH_SIZE}")
 
     qual_lookup = _build_qualifying_lookup(qualifying_df)
     del qualifying_df
+    gc.collect()
 
-    grouped = intraday_df.groupby(["ticker", "date"])
-    n_groups = grouped.ngroups
-    logger.info(f"[INIT] groupby done, {n_groups} groups")
     # #region agent log (debug-d20cd9)
-    _dbg("backtest_service.py:run_backtest:groupby", "after groupby", {"n_groups": n_groups, "rss_mb": _rss_mb(), "intraday_rows": len(intraday_df)}, "H-B")
+    _dbg("backtest_service.py:init", "after qual_lookup built", {"n_pairs": n_pairs, "rss_mb": _rss_mb()}, "H-B")
     # #endregion
 
     all_trades: list[dict] = []
@@ -85,117 +90,131 @@ def run_backtest(
     scanned = 0
     t1 = time.time()
 
-    for (ticker_raw, date_raw), day_df in grouped:
-        scanned += 1
-        day_df = day_df.sort_values("timestamp").reset_index(drop=True)
-        if len(day_df) < 5:
+    for batch_start in range(0, n_pairs, _BATCH_SIZE):
+        batch_pairs = pairs[batch_start:batch_start + _BATCH_SIZE]
+        batch_df = fetch_intraday_batch(dataset_id, batch_pairs)
+
+        if batch_df.empty:
+            scanned += len(batch_pairs)
             continue
 
-        ticker = ticker_raw
-        date = str(date_raw)[:10]
-        arrays = {
-            "open": day_df["open"].values,
-            "high": day_df["high"].values,
-            "low": day_df["low"].values,
-            "close": day_df["close"].values,
-            "volume": day_df["volume"].values,
-            "timestamp": day_df["timestamp"].values,
-        }
-        daily_stats = qual_lookup.get((ticker_raw, date_raw), {})
-        del day_df
+        grouped = batch_df.groupby(["ticker", "date"])
 
-        mini_df = pd.DataFrame(arrays)
+        for (ticker_raw, date_raw), day_df in grouped:
+            scanned += 1
+            day_df = day_df.sort_values("timestamp").reset_index(drop=True)
+            if len(day_df) < 5:
+                continue
 
-        try:
-            signals = translate_strategy(mini_df, strategy_def, daily_stats)
-        except Exception:
-            del mini_df
-            continue
-        if not signals["entries"].any():
+            ticker = ticker_raw
+            date = str(date_raw)[:10]
+            arrays = {
+                "open": day_df["open"].values,
+                "high": day_df["high"].values,
+                "low": day_df["low"].values,
+                "close": day_df["close"].values,
+                "volume": day_df["volume"].values,
+                "timestamp": day_df["timestamp"].values,
+            }
+            daily_stats = qual_lookup.get((ticker_raw, date_raw), {})
+            del day_df
+
+            mini_df = pd.DataFrame(arrays)
+
+            try:
+                signals = translate_strategy(mini_df, strategy_def, daily_stats)
+            except Exception:
+                del mini_df
+                continue
+            if not signals["entries"].any():
+                del mini_df, signals
+                continue
+
+            entries_arr = signals["entries"].values if hasattr(signals["entries"], "values") else np.asarray(signals["entries"])
+            exits_arr = signals["exits"].values if hasattr(signals["exits"], "values") else np.asarray(signals["exits"])
+
+            try:
+                sim_result = simulate(
+                    close=arrays["close"],
+                    open_=arrays["open"],
+                    high=arrays["high"],
+                    low=arrays["low"],
+                    entries=entries_arr,
+                    exits=exits_arr,
+                    direction=signals["direction"],
+                    init_cash=init_cash,
+                    risk_r=risk_r,
+                    fees=fees,
+                    slippage=slippage,
+                    sl_stop=signals["sl_stop"],
+                    sl_trail=signals["sl_trail"],
+                    tp_stop=signals["tp_stop"],
+                    accumulate=signals.get("accept_reentries", False),
+                )
+            except Exception as exc:
+                logger.warning(f"[STREAM] day {ticker} {date} failed: {exc}")
+                del mini_df, signals
+                continue
+
             del mini_df, signals
-            continue
 
-        entries_arr = signals["entries"].values if hasattr(signals["entries"], "values") else np.asarray(signals["entries"])
-        exits_arr = signals["exits"].values if hasattr(signals["exits"], "values") else np.asarray(signals["exits"])
+            eq_vals = sim_result["equity"]
+            raw_trades = sim_result["trades"]
 
-        try:
-            sim_result = simulate(
-                close=arrays["close"],
-                open_=arrays["open"],
-                high=arrays["high"],
-                low=arrays["low"],
-                entries=entries_arr,
-                exits=exits_arr,
-                direction=signals["direction"],
-                init_cash=init_cash,
-                risk_r=risk_r,
-                fees=fees,
-                slippage=slippage,
-                sl_stop=signals["sl_stop"],
-                sl_trail=signals["sl_trail"],
-                tp_stop=signals["tp_stop"],
-                accumulate=signals.get("accept_reentries", False),
-            )
-        except Exception as exc:
-            logger.warning(f"[STREAM] day {ticker} {date} failed: {exc}")
-            del mini_df, signals
-            continue
+            if not raw_trades:
+                del sim_result
+                continue
 
-        del mini_df, signals
+            timestamps = pd.Series(pd.to_datetime(arrays["timestamp"]))
+            ts_epoch = timestamps.values.astype("datetime64[s]").astype("int64")
 
-        eq_vals = sim_result["equity"]
-        raw_trades = sim_result["trades"]
+            candles_dict = {
+                "ticker": ticker,
+                "date": date,
+                "candles": _build_candles(ts_epoch, arrays),
+            }
 
-        if not raw_trades:
-            del sim_result
-            continue
+            trades_records = _enrich_trades(raw_trades, timestamps, ticker, date, strategy_def)
 
-        timestamps = pd.Series(pd.to_datetime(arrays["timestamp"]))
-        ts_epoch = timestamps.values.astype("datetime64[s]").astype("int64")
+            equity = _extract_equity_from_values(eq_vals, timestamps)
+            equity_dict = {"ticker": ticker, "date": date, "equity": equity}
 
-        candles_dict = {
-            "ticker": ticker,
-            "date": date,
-            "candles": _build_candles(ts_epoch, arrays),
-        }
+            stats = _extract_day_stats_from_values(eq_vals, ticker, date, trades_records)
 
-        trades_records = _enrich_trades(raw_trades, timestamps, ticker, date, strategy_def)
+            all_candles.append(candles_dict)
+            all_trades.extend(trades_records)
+            all_equity.append(equity_dict)
+            day_results.append(stats)
+            days_with_entries += 1
 
-        equity = _extract_equity_from_values(eq_vals, timestamps)
-        equity_dict = {"ticker": ticker, "date": date, "equity": equity}
+            del sim_result, eq_vals, raw_trades, arrays, daily_stats
 
-        stats = _extract_day_stats_from_values(eq_vals, ticker, date, trades_records)
+        del batch_df, grouped
+        gc.collect()
+        _release_memory()
 
-        all_candles.append(candles_dict)
-        all_trades.extend(trades_records)
-        all_equity.append(equity_dict)
-        day_results.append(stats)
-        days_with_entries += 1
+        batch_idx = batch_start // _BATCH_SIZE + 1
+        total_batches = (n_pairs + _BATCH_SIZE - 1) // _BATCH_SIZE
+        logger.info(
+            f"[BATCH {batch_idx}/{total_batches}] "
+            f"{days_with_entries} days with entries, {scanned} scanned "
+            f"({round(time.time()-t1, 2)}s)"
+        )
+        # #region agent log (debug-d20cd9)
+        _dbg("backtest_service.py:batch_done", "batch completed", {
+            "batch_idx": batch_idx, "total_batches": total_batches,
+            "days_with_entries": days_with_entries, "scanned": scanned,
+            "rss_mb": _rss_mb(), "n_trades": len(all_trades),
+            "n_candles": len(all_candles), "elapsed_s": round(time.time() - t1, 2)
+        }, "H-A")
+        # #endregion
 
-        del sim_result, eq_vals, raw_trades, arrays, daily_stats
-
-        if days_with_entries % 20 == 0:
-            logger.info(
-                f"[STREAM] {days_with_entries} days processed, "
-                f"{scanned}/{n_groups} scanned ({round(time.time()-t1, 2)}s)"
-            )
-            # #region agent log (debug-d20cd9)
-            _dbg("backtest_service.py:stream_loop", "stream progress", {
-                "days_with_entries": days_with_entries, "scanned": scanned,
-                "rss_mb": _rss_mb(), "n_trades": len(all_trades),
-                "n_candles": len(all_candles), "elapsed_s": round(time.time() - t1, 2)
-            }, "H-A")
-            # #endregion
-
-    del grouped, intraday_df, qual_lookup
-    gc.collect()
-    _release_memory()
     logger.info(
         f"[STREAM] done: {days_with_entries} days with entries "
         f"({round(time.time()-t1, 2)}s)"
     )
     # #region agent log (debug-d20cd9)
-    _dbg("backtest_service.py:stream_done", "stream loop finished", {
+    _dbg("backtest_service.py:stream_done", "all batches finished", {
         "days_with_entries": days_with_entries, "total_trades": len(all_trades),
         "total_candles": len(all_candles), "rss_mb": _rss_mb(),
         "elapsed_s": round(time.time() - t1, 2)

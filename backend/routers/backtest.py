@@ -5,7 +5,7 @@ import time
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from backend.services.data_service import get_strategy, fetch_dataset_data
+from backend.services.data_service import get_strategy, fetch_dataset_data, fetch_intraday_batch
 from backend.services.backtest_service import run_backtest
 from backend.services.montecarlo_service import run_montecarlo
 
@@ -43,33 +43,32 @@ def run_backtest_endpoint(req: BacktestRequest):
 
     try:
         t_fetch = time.time()
-        qualifying, intraday = fetch_dataset_data(req.dataset_id)
+        qualifying, pairs = fetch_dataset_data(req.dataset_id)
         logger.info(
             f"  data fetched: {len(qualifying)} qualifying rows, "
-            f"{len(intraday)} intraday rows ({round(time.time()-t_fetch, 2)}s)"
+            f"{len(pairs)} pairs ({round(time.time()-t_fetch, 2)}s)"
         )
     except Exception as e:
         logger.error(f"  data fetch FAILED: {e}")
         raise HTTPException(status_code=500, detail=f"Error fetching data: {str(e)}")
 
-    if intraday.empty:
+    if not pairs:
         raise HTTPException(
             status_code=400,
             detail="No hay datos intradiarios para este dataset",
         )
 
-    unique_days = intraday.groupby(["ticker", "date"]).ngroups
-    logger.info(f"  unique days: {unique_days}")
-    if unique_days > MAX_DAYS:
+    if len(pairs) > MAX_DAYS:
         raise HTTPException(
             status_code=400,
-            detail=f"Demasiados dias ({unique_days}). Maximo permitido: {MAX_DAYS}.",
+            detail=f"Demasiados dias ({len(pairs)}). Maximo permitido: {MAX_DAYS}.",
         )
 
     try:
         t_bt = time.time()
         results = run_backtest(
-            intraday_df=intraday,
+            dataset_id=req.dataset_id,
+            pairs=pairs,
             qualifying_df=qualifying,
             strategy_def=strategy["definition"],
             init_cash=req.init_cash,
@@ -77,7 +76,7 @@ def run_backtest_endpoint(req: BacktestRequest):
             fees=req.fees,
             slippage=req.slippage,
         )
-        del intraday, qualifying
+        del qualifying
         gc.collect()
 
         bt_elapsed = round(time.time() - t_bt, 2)

@@ -110,15 +110,14 @@ def delete_dataset(dataset_id: str) -> bool:
 # Data fetching for backtest
 # ---------------------------------------------------------------------------
 
-def fetch_dataset_data(dataset_id: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+def fetch_dataset_data(dataset_id: str) -> tuple[pd.DataFrame, list[tuple[str, str]]]:
     """
     Returns:
         qualifying: daily stats from daily_metrics enriched with yesterday_high/low
-        intraday: raw 1m candles from intraday_1m
+        pairs: list of (ticker, date) tuples for intraday batch fetching
     """
     t0 = time.time()
 
-    # Filter daily_metrics to only relevant tickers BEFORE computing LAG
     qualifying_sql = """
     WITH relevant_tickers AS (
         SELECT DISTINCT ticker FROM dataset_pairs WHERE dataset_id = ?
@@ -146,23 +145,40 @@ def fetch_dataset_data(dataset_id: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     logger.info(f"qualifying query: {len(qualifying)} rows ({round(t_q - t0, 2)}s)")
 
     if qualifying.empty:
-        return qualifying, pd.DataFrame()
+        return qualifying, []
 
-    intraday_sql = """
+    pairs_df = query_df(
+        "SELECT ticker, date FROM dataset_pairs WHERE dataset_id = ? ORDER BY ticker, date",
+        [dataset_id],
+    )
+    pairs = [(r["ticker"], r["date"]) for _, r in pairs_df.iterrows()]
+    logger.info(f"pairs fetched: {len(pairs)}")
+
+    return qualifying, pairs
+
+
+def fetch_intraday_batch(
+    dataset_id: str, pairs: list[tuple[str, str]]
+) -> pd.DataFrame:
+    """Fetch intraday candles for a specific batch of (ticker, date) pairs."""
+    if not pairs:
+        return pd.DataFrame()
+
+    values_clause = ", ".join(
+        f"('{t}', '{d}')" for t, d in pairs
+    )
+    sql = f"""
     SELECT i.ticker, i.date, i."timestamp", i.open, i.high, i.low,
            i."close", i.volume
     FROM intraday_1m i
-    INNER JOIN dataset_pairs dp ON i.ticker = dp.ticker AND i.date = dp.date
-    WHERE dp.dataset_id = ?
+    WHERE (i.ticker, i.date) IN ({values_clause})
     """
-    intraday = query_df(intraday_sql, [dataset_id])
-    t_i = time.time()
-    logger.info(f"intraday query: {len(intraday)} rows ({round(t_i - t_q, 2)}s)")
+    df = query_df(sql)
 
     for col in ("open", "high", "low", "close"):
-        if col in intraday.columns:
-            intraday[col] = intraday[col].astype("float32")
-    if "volume" in intraday.columns:
-        intraday["volume"] = intraday["volume"].astype("int32")
+        if col in df.columns:
+            df[col] = df[col].astype("float32")
+    if "volume" in df.columns:
+        df["volume"] = df["volume"].astype("int32")
 
-    return qualifying, intraday
+    return df
