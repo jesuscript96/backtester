@@ -151,7 +151,7 @@ def fetch_dataset_data(dataset_id: str) -> tuple[pd.DataFrame, list[tuple[str, s
         "SELECT ticker, date FROM dataset_pairs WHERE dataset_id = ? ORDER BY ticker, date",
         [dataset_id],
     )
-    pairs = [(r["ticker"], r["date"]) for _, r in pairs_df.iterrows()]
+    pairs = [(r["ticker"], str(r["date"])[:10]) for _, r in pairs_df.iterrows()]
     logger.info(f"pairs fetched: {len(pairs)}")
 
     return qualifying, pairs
@@ -164,8 +164,11 @@ def fetch_intraday_batch(
     if not pairs:
         return pd.DataFrame()
 
+    import time as _t
+    t0 = _t.time()
+
     values_clause = ", ".join(
-        f"('{t}', '{d}')" for t, d in pairs
+        f"('{t}', '{str(d)[:10]}')" for t, d in pairs
     )
     sql = f"""
     SELECT i.ticker, i.date, i."timestamp", i.open, i.high, i.low,
@@ -173,7 +176,11 @@ def fetch_intraday_batch(
     FROM intraday_1m i
     WHERE (i.ticker, i.date) IN ({values_clause})
     """
-    df = query_df(sql)
+    try:
+        df = query_df(sql)
+    except Exception as e:
+        logger.error(f"fetch_intraday_batch FAILED ({len(pairs)} pairs): {e}")
+        raise
 
     for col in ("open", "high", "low", "close"):
         if col in df.columns:
@@ -181,4 +188,5 @@ def fetch_intraday_batch(
     if "volume" in df.columns:
         df["volume"] = df["volume"].astype("int32")
 
+    logger.info(f"intraday batch: {len(pairs)} pairs -> {len(df)} rows ({round(_t.time() - t0, 2)}s)")
     return df
