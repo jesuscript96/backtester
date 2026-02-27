@@ -33,19 +33,23 @@ export default function BacktestPanel({ onRun, loading }: BacktestPanelProps) {
     setLoadError(false);
     let failed = false;
     try {
+      console.log("[INIT] Fetching datasets...");
       const d = await fetchDatasets();
+      console.log("[INIT] Datasets OK:", d.length);
       setDatasets(d);
       if (d.length > 0) setSelectedDataset(d[0].id);
     } catch (e) {
-      console.error("Error loading datasets:", e);
+      console.error("[INIT] Datasets FAILED:", e);
       failed = true;
     }
     try {
+      console.log("[INIT] Fetching strategies...");
       const s = await fetchStrategies();
+      console.log("[INIT] Strategies OK:", s.length);
       setStrategies(s);
       if (s.length > 0) setSelectedStrategy(s[0].id);
     } catch (e) {
-      console.error("Error loading strategies:", e);
+      console.error("[INIT] Strategies FAILED:", e);
       failed = true;
     }
     setLoadError(failed);

@@ -43,9 +43,13 @@ export default function Home() {
     datasetIdRef.current = params.dataset_id;
 
     try {
+      console.log("[BT] POST /api/backtest starting...", { dataset_id: params.dataset_id, strategy_id: params.strategy_id });
+      const t0 = Date.now();
       const data = await runBacktest(params);
+      console.log("[BT] Response OK in", ((Date.now() - t0) / 1000).toFixed(1), "s — days:", data.day_results?.length, "trades:", data.trades?.length);
       setResult(data);
     } catch (err: unknown) {
+      console.error("[BT] Request FAILED:", err);
       let msg = "Error desconocido";
       if (err && typeof err === "object" && "response" in err) {
         const axiosErr = err as { response?: { data?: { detail?: string } } };
@@ -75,13 +79,16 @@ export default function Home() {
       setCandlesLoading(true);
       setDayCandles(null);
       try {
+        console.log("[CANDLE] Loading candles for", day.ticker, day.date);
         const data = await fetchDayCandles(
           datasetIdRef.current,
           day.ticker,
           day.date
         );
+        console.log("[CANDLE] Got", data.candles?.length, "bars");
         setDayCandles(data);
-      } catch {
+      } catch (e) {
+        console.error("[CANDLE] Failed:", e);
         setDayCandles(null);
       } finally {
         setCandlesLoading(false);
