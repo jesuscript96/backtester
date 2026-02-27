@@ -2,19 +2,17 @@
 Runs vectorbt backtests per ticker-date pair using translated strategy signals.
 Aggregates results across all qualifying days.
 
-Performance strategy:
-  - Phase 1: Generate signals for all days in parallel (ThreadPoolExecutor)
-  - Phase 2: Group compatible days by (bar_count, risk_params)
-  - Phase 3: Execute batched Portfolio.from_signals() per group (one vbt call per group)
-  - Phase 4: Extract per-column results from batched portfolios
+Memory-optimised streaming architecture:
+  Single-pass loop over groupby — signal generation + portfolio simulation
+  happen for one day at a time so peak RSS stays under 512 MB (Render starter).
 """
 
+import ctypes
 import gc
 import logging
 import os
+import sys
 import time
-from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -28,6 +26,15 @@ _MAX_WORKERS = int(os.getenv("BACKTEST_WORKERS", "1"))
 _MIN_BATCH_SIZE = 2
 
 
+def _release_memory():
+    """Ask the C allocator to return freed pages to the OS (Linux only)."""
+    if sys.platform == "linux":
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
+
+
 def run_backtest(
     intraday_df: pd.DataFrame,
     qualifying_df: pd.DataFrame,
@@ -37,104 +44,81 @@ def run_backtest(
     slippage: float = 0.0,
 ) -> dict:
     """
-    Run backtest for each (ticker, date) pair independently.
-    Returns aggregated metrics + per-day details.
+    Streaming backtest: iterate groupby once, process each day immediately,
+    never holding more than one day's data + one Portfolio in memory.
     """
     t_total = time.time()
     grouped = intraday_df.groupby(["ticker", "date"])
-    logger.info(f"[PHASE 0] groupby done, {grouped.ngroups} groups, workers={_MAX_WORKERS}")
+    n_groups = grouped.ngroups
+    logger.info(f"[INIT] groupby done, {n_groups} groups")
 
     t0 = time.time()
     qual_lookup = _build_qualifying_lookup(qualifying_df)
-    logger.info(f"[PHASE 0] qualifying lookup built ({round(time.time()-t0, 2)}s)")
+    del qualifying_df
+    logger.info(f"[INIT] qualifying lookup built ({round(time.time()-t0, 2)}s)")
 
-    # Phase 1 — generate signals for all days in parallel
-    signal_inputs = []
-    for (ticker, date), day_df in grouped:
-        day_df = day_df.sort_values("timestamp").reset_index(drop=True)
-        if len(day_df) < 5:
-            continue
-        daily_stats = qual_lookup.get((ticker, date), {})
-        signal_inputs.append((ticker, str(date), day_df, daily_stats))
-
-    del grouped, qual_lookup, intraday_df, qualifying_df
-    gc.collect()
-
-    logger.info(f"[PHASE 1] generating signals for {len(signal_inputs)} days (workers={_MAX_WORKERS})...")
-    t1 = time.time()
-    prepared: list[tuple] = []
-
-    if _MAX_WORKERS <= 1:
-        for i, (ticker, date, day_df, daily_stats) in enumerate(signal_inputs):
-            try:
-                signals = translate_strategy(day_df, strategy_def, daily_stats)
-            except Exception:
-                continue
-            if not signals["entries"].any():
-                continue
-            prepared.append(_slim_item(ticker, date, day_df, signals))
-            if (i + 1) % 25 == 0:
-                logger.info(f"[PHASE 1] ... {i+1}/{len(signal_inputs)} done ({round(time.time()-t1, 2)}s)")
-    else:
-        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
-            future_map = {
-                executor.submit(translate_strategy, inp[2], strategy_def, inp[3]): inp
-                for inp in signal_inputs
-            }
-            for future in as_completed(future_map):
-                ticker, date, day_df, daily_stats = future_map[future]
-                try:
-                    signals = future.result()
-                except Exception:
-                    continue
-                if not signals["entries"].any():
-                    continue
-                prepared.append(_slim_item(ticker, date, day_df, signals))
-
-    logger.info(f"[PHASE 1] signals done: {len(prepared)} days with entries ({round(time.time()-t1, 2)}s)")
-
-    del signal_inputs
-    gc.collect()
-
-    # Phase 2 — process each day individually to minimise peak RAM
     all_trades: list[dict] = []
     all_candles: list[dict] = []
     all_equity: list[dict] = []
     day_results: list[dict] = []
 
-    total_days = len(prepared)
-    logger.info(f"[PHASE 2] processing {total_days} days one-by-one (low-memory mode)")
+    days_with_entries = 0
+    t1 = time.time()
 
-    t3 = time.time()
-    for i in range(len(prepared)):
-        item = prepared[i]
-        prepared[i] = None
+    for i, ((ticker, date), day_df) in enumerate(grouped):
+        day_df = day_df.sort_values("timestamp").reset_index(drop=True)
+        if len(day_df) < 5:
+            continue
+
+        daily_stats = qual_lookup.get((ticker, date), {})
 
         try:
-            r = _process_single_prepared(item, init_cash, fees, slippage, strategy_def)
-        except Exception as exc:
-            logger.warning(f"[PHASE 2] day {i+1} failed: {exc}")
-            r = None
+            signals = translate_strategy(day_df, strategy_def, daily_stats)
+        except Exception:
+            continue
+        if not signals["entries"].any():
+            del signals
+            continue
 
-        del item
+        slim = _slim_item(ticker, str(date), day_df, signals)
+        del day_df, signals
+
+        try:
+            r = _process_single_prepared(slim, init_cash, fees, slippage, strategy_def)
+        except Exception as exc:
+            logger.warning(f"[STREAM] day {ticker} {date} failed: {exc}")
+            r = None
+        del slim
+
         if r is not None:
             candles, trades, equity, stats = r
             all_candles.append(candles)
             all_trades.extend(trades)
             all_equity.append(equity)
             day_results.append(stats)
+            days_with_entries += 1
 
-        if (i + 1) % 10 == 0 or (i + 1) == total_days:
             gc.collect()
-            logger.info(f"[PHASE 2] {i+1}/{total_days} done ({round(time.time()-t3, 2)}s)")
+            _release_memory()
 
-    del prepared
-    logger.info(f"[PHASE 2] all days done ({round(time.time()-t3, 2)}s)")
+            if days_with_entries % 10 == 0:
+                logger.info(
+                    f"[STREAM] {days_with_entries} days processed, "
+                    f"{i+1}/{n_groups} scanned ({round(time.time()-t1, 2)}s)"
+                )
+
+    del grouped, qual_lookup, intraday_df
+    gc.collect()
+    _release_memory()
+    logger.info(
+        f"[STREAM] done: {days_with_entries} days with entries "
+        f"out of {n_groups} ({round(time.time()-t1, 2)}s)"
+    )
 
     t4 = time.time()
     aggregate = _aggregate_metrics(day_results, all_trades)
     global_eq, global_dd = _compute_global_equity_and_drawdown(all_equity, init_cash)
-    logger.info(f"[PHASE 4] aggregate+equity done ({round(time.time()-t4, 2)}s)")
+    logger.info(f"[AGG] aggregate+equity done ({round(time.time()-t4, 2)}s)")
 
     logger.info(
         f"[DONE] {len(day_results)} days, {len(all_trades)} trades, "
