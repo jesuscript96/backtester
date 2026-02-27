@@ -38,11 +38,14 @@ def translate_strategy(
     entry_df = _resample_if_needed(df, entry_tf)
     exit_df = _resample_if_needed(df, exit_tf)
 
+    entry_cache: dict = {}
+    exit_cache: dict = entry_cache if entry_tf == exit_tf else {}
+
     entries = _evaluate_condition_group(
-        entry_logic.get("root_condition", {}), entry_df, daily_stats
+        entry_logic.get("root_condition", {}), entry_df, daily_stats, entry_cache
     )
     exits = _evaluate_condition_group(
-        exit_logic.get("root_condition", {}), exit_df, daily_stats
+        exit_logic.get("root_condition", {}), exit_df, daily_stats, exit_cache
     )
 
     if entry_tf != "1m":
@@ -50,7 +53,8 @@ def translate_strategy(
     if exit_tf != "1m":
         exits = exits.reindex(df.index, method="ffill").fillna(False)
 
-    sl_stop, sl_trail, tp_stop = _parse_risk_management(risk, df, daily_stats)
+    risk_cache: dict = entry_cache if entry_tf == "1m" else {}
+    sl_stop, sl_trail, tp_stop = _parse_risk_management(risk, df, daily_stats, risk_cache)
 
     return {
         "entries": entries.astype(bool),
@@ -87,6 +91,7 @@ def _evaluate_condition_group(
     group: dict,
     df: pd.DataFrame,
     daily_stats: dict | None,
+    cache: dict | None = None,
 ) -> pd.Series:
     """Recursively evaluate a ConditionGroup with AND/OR logic."""
     if not group:
@@ -102,9 +107,9 @@ def _evaluate_condition_group(
     for cond in conditions:
         cond_type = cond.get("type", "")
         if cond_type == "group" or ("conditions" in cond and "operator" in cond):
-            result = _evaluate_condition_group(cond, df, daily_stats)
+            result = _evaluate_condition_group(cond, df, daily_stats, cache)
         else:
-            result = _evaluate_single_condition(cond, df, daily_stats)
+            result = _evaluate_single_condition(cond, df, daily_stats, cache)
         results.append(result)
 
     if not results:
@@ -124,13 +129,14 @@ def _evaluate_single_condition(
     cond: dict,
     df: pd.DataFrame,
     daily_stats: dict | None,
+    cache: dict | None = None,
 ) -> pd.Series:
     cond_type = cond.get("type", "")
 
     if cond_type == "indicator_comparison":
-        return _eval_indicator_comparison(cond, df, daily_stats)
+        return _eval_indicator_comparison(cond, df, daily_stats, cache)
     elif cond_type == "price_level_distance":
-        return _eval_price_level_distance(cond, df, daily_stats)
+        return _eval_price_level_distance(cond, df, daily_stats, cache)
     elif cond_type == "candle_pattern":
         return _eval_candle_pattern(cond, df)
     else:
@@ -141,6 +147,7 @@ def _eval_indicator_comparison(
     cond: dict,
     df: pd.DataFrame,
     daily_stats: dict | None,
+    cache: dict | None = None,
 ) -> pd.Series:
     source_cfg = cond.get("source", {})
     target_cfg = cond.get("target", {})
@@ -152,6 +159,7 @@ def _eval_indicator_comparison(
         period=source_cfg.get("period"),
         offset=source_cfg.get("offset", 0),
         daily_stats=daily_stats,
+        cache=cache,
     )
 
     if isinstance(target_cfg, (int, float)):
@@ -163,6 +171,7 @@ def _eval_indicator_comparison(
             period=target_cfg.get("period"),
             offset=target_cfg.get("offset", 0),
             daily_stats=daily_stats,
+            cache=cache,
         )
     else:
         target_series = pd.Series(float(target_cfg), index=df.index)
@@ -174,14 +183,15 @@ def _eval_price_level_distance(
     cond: dict,
     df: pd.DataFrame,
     daily_stats: dict | None,
+    cache: dict | None = None,
 ) -> pd.Series:
     source_name = cond.get("source", "Close")
     level_name = cond.get("level", "Pre-Market High")
     comparator = cond.get("comparator", "DISTANCE_LESS_THAN")
     value_pct = cond.get("value_pct", 1.0)
 
-    source_series = compute_indicator(name=source_name, df=df, daily_stats=daily_stats)
-    level_series = compute_indicator(name=level_name, df=df, daily_stats=daily_stats)
+    source_series = compute_indicator(name=source_name, df=df, daily_stats=daily_stats, cache=cache)
+    level_series = compute_indicator(name=level_name, df=df, daily_stats=daily_stats, cache=cache)
 
     distance_pct = abs(source_series - level_series) / level_series.replace(0, np.nan) * 100
 
@@ -233,6 +243,7 @@ def _parse_risk_management(
     risk: dict,
     df: pd.DataFrame,
     daily_stats: dict | None,
+    cache: dict | None = None,
 ) -> tuple[float | None, bool, float | None]:
     sl_stop = None
     sl_trail = False
@@ -249,12 +260,12 @@ def _parse_risk_management(
             first_close = df["close"].iloc[0] if not df.empty else 1
             sl_stop = hs_value / first_close if first_close > 0 else None
         elif hs_type == "ATR Multiplier":
-            atr = compute_indicator("ATR", df, period=14, daily_stats=daily_stats)
+            atr = compute_indicator("ATR", df, period=14, daily_stats=daily_stats, cache=cache)
             avg_atr = atr.dropna().mean()
             first_close = df["close"].iloc[0] if not df.empty else 1
             sl_stop = (avg_atr * hs_value) / first_close if first_close > 0 else None
         elif hs_type == "Market Structure (HOD/LOD)":
-            sl_stop = None  # Handled dynamically, not a simple float
+            sl_stop = None
 
     trailing = risk.get("trailing_stop", {})
     if trailing.get("active"):

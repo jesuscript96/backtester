@@ -5,6 +5,9 @@ vectorbt==0.28.4
 duckdb==1.4.4
 pandas==2.3.3
 numpy==2.2.6
+numba>=0.60.0
 pandas_ta==0.4.71b0
 python-dotenv==1.2.1
 pydantic==2.12.5
+# Optional: install TA-Lib for faster WMA/ADX/Williams%R (requires system lib)
+# TA-Lib>=0.4.28
