@@ -1,7 +1,6 @@
 fastapi==0.133.1
 uvicorn[standard]==0.41.0
 gunicorn==25.1.0
-vectorbt==0.28.4
 duckdb==1.4.4
 pandas==2.3.3
 numpy==2.2.6

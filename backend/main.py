@@ -31,8 +31,7 @@ app.include_router(backtest.router)
 def on_startup():
     logger.info("=== BacktesterMVP starting ===")
     logger.info(f"ALLOWED_ORIGINS = {ALLOWED_ORIGINS}")
-    from backend.services.indicators import _HAS_NUMBA
-    logger.info(f"Numba available: {_HAS_NUMBA}")
+    logger.info("Engine: pure numpy (no vectorbt)")
     # #region agent log
     import resource, sys, json, os
     try:

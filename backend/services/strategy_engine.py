@@ -1,5 +1,5 @@
 """
-Translates a strategy JSON definition into vectorbt-compatible boolean signal arrays.
+Translates a strategy JSON definition into boolean signal arrays.
 Recursively evaluates ConditionGroups (AND/OR) to produce entry/exit signals.
 """
 
@@ -14,7 +14,7 @@ def translate_strategy(
     daily_stats: dict | None = None,
 ) -> dict:
     """
-    Translate strategy definition JSON into vectorbt parameters.
+    Translate strategy definition JSON into simulation parameters.
 
     Returns dict with:
         entries: pd.Series[bool]

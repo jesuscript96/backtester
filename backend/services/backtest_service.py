@@ -1,10 +1,10 @@
 """
-Runs vectorbt backtests per ticker-date pair using translated strategy signals.
-Aggregates results across all qualifying days.
+Runs backtests per ticker-date pair using translated strategy signals.
+Pure numpy simulation — no vectorbt dependency.
 
 Memory-optimised streaming architecture:
   Single-pass loop over groupby — signal generation + portfolio simulation
-  happen for one day at a time so peak RSS stays under 512 MB (Render starter).
+  happen for one day at a time so peak RSS stays well under 512 MB.
 """
 
 import ctypes
@@ -18,9 +18,9 @@ import time
 
 import numpy as np
 import pandas as pd
-import vectorbt as vbt
 
 from backend.services.strategy_engine import translate_strategy
+from backend.services.portfolio_sim import simulate
 
 logger = logging.getLogger("backtester.engine")
 
@@ -48,12 +48,8 @@ def _dbg(msg, data=None, hyp="A"):
         pass
 # #endregion
 
-_MAX_WORKERS = int(os.getenv("BACKTEST_WORKERS", "1"))
-_MIN_BATCH_SIZE = 2
-
 
 def _release_memory():
-    """Ask the C allocator to return freed pages to the OS (Linux only)."""
     if sys.platform == "linux":
         try:
             ctypes.CDLL("libc.so.6").malloc_trim(0)
@@ -69,13 +65,6 @@ def run_backtest(
     fees: float = 0.0,
     slippage: float = 0.0,
 ) -> dict:
-    """
-    Two-pass low-memory backtest:
-      Pass 1 – extract every (ticker,date) group to lightweight numpy dicts,
-               then DELETE the big 143K-row DataFrame.
-      Pass 2 – for each day, rebuild a tiny DataFrame, generate signals,
-               run Portfolio, collect results, free everything, malloc_trim.
-    """
     t_total = time.time()
     # #region agent log
     _dbg("backtest_start", {"init_cash": init_cash, "intraday_rows": len(intraday_df)}, "A")
@@ -86,7 +75,6 @@ def run_backtest(
 
     qual_lookup = _build_qualifying_lookup(qualifying_df)
 
-    # --- Pass 1: extract to numpy, ~7 MB for 176 days ----------------------
     day_items: list[tuple | None] = []
     for (ticker, date), day_df in grouped:
         day_df = day_df.sort_values("timestamp").reset_index(drop=True)
@@ -114,7 +102,6 @@ def run_backtest(
     _dbg("pass1_done_dfs_freed", {"n_days": len(day_items)}, "A")
     # #endregion
 
-    # --- Pass 2: signal generation + portfolio, one day at a time -----------
     all_trades: list[dict] = []
     all_candles: list[dict] = []
     all_equity: list[dict] = []
@@ -126,7 +113,7 @@ def run_backtest(
         ticker, date, arrays, daily_stats = day_items[i]
         day_items[i] = None
         # #region agent log
-        if i % 5 == 0:
+        if i % 20 == 0:
             _dbg(f"pass2_day_{i}", {"ticker": ticker, "date": date, "bars": len(arrays["close"])}, "A")
         # #endregion
 
@@ -141,41 +128,69 @@ def run_backtest(
             del mini_df, signals
             continue
 
-        slim_signals = {
-            "entries": signals["entries"].values if hasattr(signals["entries"], "values") else signals["entries"],
-            "exits": signals["exits"].values if hasattr(signals["exits"], "values") else signals["exits"],
-            "sl_stop": signals["sl_stop"],
-            "sl_trail": signals["sl_trail"],
-            "tp_stop": signals["tp_stop"],
-            "direction": signals["direction"],
-            "accept_reentries": signals.get("accept_reentries", False),
-        }
-        slim = (ticker, date, arrays, slim_signals)
-        del mini_df, signals, arrays, daily_stats
+        entries_arr = signals["entries"].values if hasattr(signals["entries"], "values") else np.asarray(signals["entries"])
+        exits_arr = signals["exits"].values if hasattr(signals["exits"], "values") else np.asarray(signals["exits"])
 
         try:
-            r = _process_single_prepared(slim, init_cash, fees, slippage, strategy_def)
+            sim_result = simulate(
+                close=arrays["close"],
+                open_=arrays["open"],
+                high=arrays["high"],
+                low=arrays["low"],
+                entries=entries_arr,
+                exits=exits_arr,
+                direction=signals["direction"],
+                init_cash=init_cash,
+                fees=fees,
+                slippage=slippage,
+                sl_stop=signals["sl_stop"],
+                sl_trail=signals["sl_trail"],
+                tp_stop=signals["tp_stop"],
+                accumulate=signals.get("accept_reentries", False),
+            )
         except Exception as exc:
             logger.warning(f"[STREAM] day {ticker} {date} failed: {exc}")
-            r = None
-        del slim
+            del mini_df, signals
+            continue
 
-        if r is not None:
-            candles, trades, equity, stats = r
-            all_candles.append(candles)
-            all_trades.extend(trades)
-            all_equity.append(equity)
-            day_results.append(stats)
-            days_with_entries += 1
+        del mini_df, signals
 
-            if days_with_entries % 10 == 0:
-                logger.info(
-                    f"[STREAM] {days_with_entries} days processed, "
-                    f"{i+1}/{len(day_items)} scanned ({round(time.time()-t1, 2)}s)"
-                )
+        eq_vals = sim_result["equity"]
+        raw_trades = sim_result["trades"]
 
-        gc.collect()
-        _release_memory()
+        if not raw_trades:
+            del sim_result
+            continue
+
+        timestamps = pd.to_datetime(arrays["timestamp"])
+        ts_epoch = (timestamps.astype("int64") // 10**9).values
+
+        candles_dict = {
+            "ticker": ticker,
+            "date": date,
+            "candles": _build_candles(ts_epoch, arrays),
+        }
+
+        trades_records = _enrich_trades(raw_trades, timestamps, ticker, date, strategy_def)
+
+        equity = _extract_equity_from_values(eq_vals, timestamps)
+        equity_dict = {"ticker": ticker, "date": date, "equity": equity}
+
+        stats = _extract_day_stats_from_values(eq_vals, ticker, date, trades_records)
+
+        all_candles.append(candles_dict)
+        all_trades.extend(trades_records)
+        all_equity.append(equity_dict)
+        day_results.append(stats)
+        days_with_entries += 1
+
+        del sim_result, eq_vals, raw_trades, arrays, daily_stats
+
+        if days_with_entries % 20 == 0:
+            logger.info(
+                f"[STREAM] {days_with_entries} days processed, "
+                f"{i+1}/{len(day_items)} scanned ({round(time.time()-t1, 2)}s)"
+            )
 
     del day_items
     gc.collect()
@@ -217,7 +232,6 @@ def run_backtest(
 # ---------------------------------------------------------------------------
 
 def _build_qualifying_lookup(qualifying_df: pd.DataFrame) -> dict:
-    """Pre-index qualifying stats by (ticker, date) for O(1) access."""
     if qualifying_df.empty:
         return {}
     lookup: dict = {}
@@ -226,376 +240,91 @@ def _build_qualifying_lookup(qualifying_df: pd.DataFrame) -> dict:
     return lookup
 
 
-def _slim_item(ticker: str, date: str, day_df: pd.DataFrame, signals: dict) -> tuple:
-    """Convert DataFrame + signals to lightweight numpy-only tuple."""
-    day_data = {
-        "close": day_df["close"].values,
-        "open": day_df["open"].values,
-        "high": day_df["high"].values,
-        "low": day_df["low"].values,
-        "volume": day_df["volume"].values,
-        "timestamp": day_df["timestamp"].values,
-    }
-    slim_signals = {
-        "entries": signals["entries"].values if hasattr(signals["entries"], "values") else signals["entries"],
-        "exits": signals["exits"].values if hasattr(signals["exits"], "values") else signals["exits"],
-        "sl_stop": signals["sl_stop"],
-        "sl_trail": signals["sl_trail"],
-        "tp_stop": signals["tp_stop"],
-        "direction": signals["direction"],
-        "accept_reentries": signals.get("accept_reentries", False),
-    }
-    return (ticker, date, day_data, slim_signals)
+def _build_candles(ts_epoch: np.ndarray, arrays: dict) -> list[dict]:
+    n = len(ts_epoch)
+    candles = [None] * n
+    for j in range(n):
+        candles[j] = {
+            "time": int(ts_epoch[j]),
+            "open": float(arrays["open"][j]),
+            "high": float(arrays["high"][j]),
+            "low": float(arrays["low"][j]),
+            "close": float(arrays["close"][j]),
+            "volume": int(arrays["volume"][j]),
+        }
+    return candles
 
 
-def _batch_key(day_data: dict, signals: dict) -> tuple:
-    """Grouping key for compatible days that can share one Portfolio call."""
-    sl = signals["sl_stop"]
-    tp = signals["tp_stop"]
-    return (
-        len(day_data["close"]),
-        signals["direction"],
-        round(sl, 8) if sl is not None else None,
-        signals["sl_trail"],
-        round(tp, 8) if tp is not None else None,
-        signals.get("accept_reentries", False),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Batch processing — single Portfolio.from_signals() for N days
-# ---------------------------------------------------------------------------
-
-def _process_batch(
-    batch_items: list[tuple],
-    init_cash: float,
-    fees: float,
-    slippage: float,
-    strategy_def: dict,
-) -> list[tuple | None]:
-    """Run a batch of same-length, same-risk-params days in one vbt call."""
-    col_names = [f"{t}_{d}" for t, d, _, _ in batch_items]
-    first_signals = batch_items[0][3]
-
-    close_dict = {}
-    entries_dict = {}
-    exits_dict = {}
-    open_dict = {}
-    high_dict = {}
-    low_dict = {}
-
-    for col, (_t, _d, day_data, signals) in zip(col_names, batch_items):
-        close_dict[col] = day_data["close"]
-        open_dict[col] = day_data["open"]
-        high_dict[col] = day_data["high"]
-        low_dict[col] = day_data["low"]
-        entries_dict[col] = signals["entries"]
-        exits_dict[col] = signals["exits"]
-
-    pf_kwargs: dict = {
-        "close": pd.DataFrame(close_dict),
-        "entries": pd.DataFrame(entries_dict),
-        "exits": pd.DataFrame(exits_dict),
-        "direction": first_signals["direction"],
-        "init_cash": init_cash,
-        "fees": fees,
-        "slippage": slippage,
-        "open": pd.DataFrame(open_dict),
-        "high": pd.DataFrame(high_dict),
-        "low": pd.DataFrame(low_dict),
-        "freq": "1min",
-    }
-
-    sl_stop = first_signals["sl_stop"]
-    if sl_stop is not None:
-        pf_kwargs["sl_stop"] = sl_stop
-        if first_signals["sl_trail"]:
-            pf_kwargs["sl_trail"] = True
-    if first_signals["tp_stop"] is not None:
-        pf_kwargs["tp_stop"] = first_signals["tp_stop"]
-    if not first_signals.get("accept_reentries", False):
-        pf_kwargs["accumulate"] = False
-
-    try:
-        pf = vbt.Portfolio.from_signals(**pf_kwargs)
-    except Exception:
-        return [
-            _process_single_prepared(item, init_cash, fees, slippage, strategy_def)
-            for item in batch_items
-        ]
-
-    try:
-        all_records = pf.trades.records_readable
-    except Exception:
-        all_records = pd.DataFrame()
-
-    equity_df = pf.value()
-    del pf
-
-    results: list[tuple | None] = []
-    for col, (ticker, date, day_data, signals) in zip(col_names, batch_items):
-        timestamps = pd.to_datetime(day_data["timestamp"])
-        n_bars = len(day_data["close"])
-
-        ts_epoch = (timestamps.astype("int64") // 10**9).values
-        candle_df = pd.DataFrame({
-            "time": ts_epoch.astype(int),
-            "open": day_data["open"].astype(float),
-            "high": day_data["high"].astype(float),
-            "low": day_data["low"].astype(float),
-            "close": day_data["close"].astype(float),
-            "volume": day_data["volume"].astype(int),
-        })
-        candles_dict = {"ticker": ticker, "date": date, "candles": candle_df.to_dict(orient="records")}
-
-        if not all_records.empty and "Column" in all_records.columns:
-            col_records = all_records[all_records["Column"] == col]
-        else:
-            col_records = pd.DataFrame()
-        trades_records = _extract_trades_from_records(
-            col_records, timestamps, ticker, date, strategy_def, n_bars
-        )
-
-        col_equity_vals = equity_df[col].values if col in equity_df.columns else np.array([])
-        equity = _extract_equity_from_values(col_equity_vals, timestamps)
-        equity_dict = {"ticker": ticker, "date": date, "equity": equity}
-
-        stats = _extract_day_stats_from_values(col_equity_vals, ticker, date, trades_records)
-
-        results.append((candles_dict, trades_records, equity_dict, stats))
-
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Single-day processing (fallback for batches of size 1)
-# ---------------------------------------------------------------------------
-
-def _process_single_prepared(
-    item: tuple,
-    init_cash: float,
-    fees: float,
-    slippage: float,
-    strategy_def: dict,
-) -> tuple | None:
-    """Process a single prepared (ticker, date, day_data, signals)."""
-    ticker, date, day_data, signals = item
-
-    close = day_data["close"]
-    open_ = day_data["open"]
-    high = day_data["high"]
-    low = day_data["low"]
-    timestamps = pd.to_datetime(day_data["timestamp"])
-    n_bars = len(close)
-
-    pf_kwargs: dict = {
-        "close": pd.Series(close, name="close"),
-        "entries": signals["entries"],
-        "exits": signals["exits"],
-        "direction": signals["direction"],
-        "init_cash": init_cash,
-        "fees": fees,
-        "slippage": slippage,
-        "open": pd.Series(open_),
-        "high": pd.Series(high),
-        "low": pd.Series(low),
-        "freq": "1min",
-    }
-
-    sl_stop = signals["sl_stop"]
-    if sl_stop is not None:
-        pf_kwargs["sl_stop"] = sl_stop
-        if signals["sl_trail"]:
-            pf_kwargs["sl_trail"] = True
-    if signals["tp_stop"] is not None:
-        pf_kwargs["tp_stop"] = signals["tp_stop"]
-    if not signals.get("accept_reentries", False):
-        pf_kwargs["accumulate"] = False
-
-    try:
-        pf = vbt.Portfolio.from_signals(**pf_kwargs)
-    except Exception:
-        return None
-
-    ts_epoch = (timestamps.astype("int64") // 10**9).values
-    candle_df = pd.DataFrame({
-        "time": ts_epoch.astype(int),
-        "open": open_.astype(float),
-        "high": high.astype(float),
-        "low": low.astype(float),
-        "close": close.astype(float),
-        "volume": day_data["volume"].astype(int),
-    })
-    candles_dict = {"ticker": ticker, "date": date, "candles": candle_df.to_dict(orient="records")}
-
-    try:
-        records = pf.trades.records_readable
-    except Exception:
-        records = pd.DataFrame()
-
-    trades_records = _extract_trades_from_records(
-        records, timestamps, ticker, date, strategy_def, n_bars
-    )
-
-    eq_vals = np.asarray(pf.value(), dtype=np.float64)
-    del pf
-
-    equity = _extract_equity_from_values(eq_vals, timestamps)
-    equity_dict = {"ticker": ticker, "date": date, "equity": equity}
-
-    stats = _extract_day_stats_from_values(eq_vals, ticker, date, trades_records)
-
-    return candles_dict, trades_records, equity_dict, stats
-
-
-# ---------------------------------------------------------------------------
-# Trade extraction (vectorized, works for both single & batch)
-# ---------------------------------------------------------------------------
-
-def _extract_trades_from_records(
-    records: pd.DataFrame,
+def _enrich_trades(
+    raw_trades: list[dict],
     timestamps: pd.Series,
     ticker: str,
     date: str,
-    strategy_def: dict | None = None,
-    total_bars: int = 0,
+    strategy_def: dict,
 ) -> list[dict]:
-    """Build trade dicts from a (possibly filtered) records_readable DataFrame."""
-    try:
-        if records.empty:
-            return []
-
-        cols = records.columns
-        entry_idx_col = "Entry Timestamp" if "Entry Timestamp" in cols else "Entry Index"
-        exit_idx_col = "Exit Timestamp" if "Exit Timestamp" in cols else "Exit Index"
-        entry_price_col = "Avg Entry Price" if "Avg Entry Price" in cols else "Entry Price"
-        exit_price_col = "Avg Exit Price" if "Avg Exit Price" in cols else "Exit Price"
-
-        entry_indices = records[entry_idx_col].astype(int).values
-        exit_indices = records[exit_idx_col].astype(int).values
-
-        max_idx = len(timestamps) - 1
-        entry_clipped = np.minimum(entry_indices, max_idx)
-        exit_clipped = np.minimum(exit_indices, max_idx)
-
-        entry_ts = timestamps.iloc[entry_clipped].values
-        exit_ts = timestamps.iloc[exit_clipped].values
-
-        entry_prices = records[entry_price_col].astype(float).values
-        exit_prices = records[exit_price_col].astype(float).values
-        directions = records["Direction"].astype(str).values if "Direction" in cols else np.full(len(records), "Long")
-        pnls = records["PnL"].astype(float).values if "PnL" in cols else np.zeros(len(records))
-        returns_pct = (records["Return"].astype(float).values * 100) if "Return" in cols else np.zeros(len(records))
-        statuses = records["Status"].astype(str).values if "Status" in cols else np.full(len(records), "Closed")
-        sizes = records["Size"].astype(float).values if "Size" in cols else np.zeros(len(records))
-
-        entry_dts = pd.to_datetime(entry_ts)
-
-        exit_reasons = _determine_exit_reasons_vec(
-            entry_prices, exit_prices, directions, exit_indices, total_bars, strategy_def or {}
-        )
-        r_multiples = _compute_r_multiples_vec(
-            entry_prices, exit_prices, directions, strategy_def or {}
-        )
-
-        result_df = pd.DataFrame({
-            "ticker": ticker,
-            "date": date,
-            "entry_time": pd.Series(entry_ts).astype(str).values,
-            "exit_time": pd.Series(exit_ts).astype(str).values,
-            "entry_idx": entry_indices,
-            "exit_idx": exit_indices,
-            "entry_price": entry_prices,
-            "exit_price": exit_prices,
-            "pnl": pnls,
-            "return_pct": returns_pct,
-            "direction": directions,
-            "status": statuses,
-            "size": sizes,
-            "exit_reason": exit_reasons,
-            "r_multiple": r_multiples,
-            "entry_hour": entry_dts.hour,
-            "entry_weekday": entry_dts.weekday,
-        })
-        return result_df.to_dict(orient="records")
-    except Exception:
+    if not raw_trades:
         return []
 
+    max_idx = len(timestamps) - 1
+    result = []
+    for t in raw_trades:
+        ei = min(t["entry_idx"], max_idx)
+        xi = min(t["exit_idx"], max_idx)
+        entry_ts = timestamps.iloc[ei]
+        exit_ts = timestamps.iloc[xi]
 
-def _determine_exit_reasons_vec(
-    entry_prices: np.ndarray,
-    exit_prices: np.ndarray,
-    directions: np.ndarray,
-    exit_indices: np.ndarray,
-    total_bars: int,
-    strategy_def: dict,
-) -> np.ndarray:
-    """Vectorized exit reason assignment with priority: EOD > SL > TP > Trailing > Signal."""
-    n = len(entry_prices)
+        r_multiple = _compute_r_multiple(
+            t["entry_price"], t["exit_price"], t["direction"], strategy_def
+        )
+
+        result.append({
+            "ticker": ticker,
+            "date": date,
+            "entry_time": str(entry_ts),
+            "exit_time": str(exit_ts),
+            "entry_idx": t["entry_idx"],
+            "exit_idx": t["exit_idx"],
+            "entry_price": t["entry_price"],
+            "exit_price": t["exit_price"],
+            "pnl": t["pnl"],
+            "return_pct": t["return_pct"],
+            "direction": t["direction"],
+            "status": t["status"],
+            "size": t["size"],
+            "exit_reason": t["exit_reason"],
+            "r_multiple": r_multiple,
+            "entry_hour": entry_ts.hour,
+            "entry_weekday": entry_ts.weekday(),
+        })
+    return result
+
+
+def _compute_r_multiple(
+    entry_price: float, exit_price: float, direction: str, strategy_def: dict
+) -> float | None:
     rm = strategy_def.get("risk_management", {})
-    is_long = np.array(["long" in d.lower() for d in directions])
-    reasons = np.full(n, "Signal", dtype=object)
-
-    trailing = rm.get("trailing_stop") or {}
-    if trailing.get("active"):
-        reasons[:] = "Trailing"
-
-    tp_pct = None
-    if rm.get("use_take_profit"):
-        tp_cfg = rm.get("take_profit") or {}
-        tp_pct = tp_cfg.get("value")
-    if tp_pct and tp_pct > 0:
-        tp_long = is_long & (exit_prices >= entry_prices * (1 + tp_pct / 100))
-        tp_short = (~is_long) & (exit_prices <= entry_prices * (1 - tp_pct / 100))
-        reasons[tp_long | tp_short] = "TP"
-
     sl_pct = None
     if rm.get("use_hard_stop"):
         sl_cfg = rm.get("hard_stop") or {}
         sl_pct = sl_cfg.get("value")
-    if sl_pct and sl_pct > 0:
-        sl_long = is_long & (exit_prices <= entry_prices * (1 - sl_pct / 100))
-        sl_short = (~is_long) & (exit_prices >= entry_prices * (1 + sl_pct / 100))
-        reasons[sl_long | sl_short] = "SL"
-
-    if total_bars > 0:
-        reasons[exit_indices >= total_bars - 1] = "EOD"
-
-    return reasons
-
-
-def _compute_r_multiples_vec(
-    entry_prices: np.ndarray,
-    exit_prices: np.ndarray,
-    directions: np.ndarray,
-    strategy_def: dict,
-) -> list:
-    """Vectorized R-multiple computation."""
-    rm = strategy_def.get("risk_management", {})
-    sl_cfg = rm.get("hard_stop") or {}
-    sl_pct = sl_cfg.get("value") if rm.get("use_hard_stop") else None
-
     if not sl_pct or sl_pct <= 0:
-        return [None] * len(entry_prices)
-
-    r_risk = entry_prices * (sl_pct / 100)
-    is_long = np.array(["long" in d.lower() for d in directions])
-    pnl_per_share = np.where(is_long, exit_prices - entry_prices, entry_prices - exit_prices)
-
-    with np.errstate(divide="ignore", invalid="ignore"):
-        result = np.where(r_risk > 0, np.round(pnl_per_share / r_risk, 2), np.nan)
-    return [None if np.isnan(v) else float(v) for v in result]
+        return None
+    r_risk = entry_price * (sl_pct / 100)
+    if r_risk <= 0:
+        return None
+    is_long = "long" in direction.lower()
+    pnl_per_share = (exit_price - entry_price) if is_long else (entry_price - exit_price)
+    return round(pnl_per_share / r_risk, 2)
 
 
 # ---------------------------------------------------------------------------
-# Equity extraction (vectorized)
+# Equity extraction
 # ---------------------------------------------------------------------------
 
 _MAX_EQUITY_POINTS = 100
 
 
 def _extract_equity_from_values(eq_vals: np.ndarray, timestamps: pd.Series) -> list[dict]:
-    """Build equity list[dict] from a numpy array of equity values, downsampled if large."""
     try:
         n = min(len(eq_vals), len(timestamps))
         if n == 0:
@@ -619,7 +348,6 @@ def _compute_global_equity_and_drawdown(
     all_equity: list[dict],
     init_cash: float,
 ) -> tuple[list[dict], list[dict]]:
-    """Chain per-day equity curves into a global curve and compute drawdown."""
     if not all_equity:
         return [], []
 
@@ -659,7 +387,7 @@ def _compute_global_equity_and_drawdown(
 
 
 # ---------------------------------------------------------------------------
-# Per-day statistics (from pre-extracted equity values)
+# Per-day statistics
 # ---------------------------------------------------------------------------
 
 def _extract_day_stats_from_values(
@@ -668,7 +396,6 @@ def _extract_day_stats_from_values(
     date: str,
     trades_records: list[dict],
 ) -> dict:
-    """Compute day statistics from an equity array and trade records."""
     empty = {
         "ticker": ticker, "date": date,
         "total_return_pct": 0, "max_drawdown_pct": 0, "win_rate_pct": 0,

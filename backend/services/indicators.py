@@ -1,43 +1,14 @@
 """
 Computes technical indicators from OHLCV data.
-Uses vectorbt built-in indicators where possible, numba (optional) for custom
-computations, TA-Lib (optional) with pandas_ta fallback for the rest.
+Pure numpy/pandas implementations — no vectorbt dependency.
 """
 
 import numpy as np
 import pandas as pd
-import vectorbt as vbt
 
-# Numba is optional — heavy on memory and cold-start JIT time.
-# Pure-numpy fallbacks are provided for every @njit kernel.
-# Force pure-numpy with USE_NUMBA_CUSTOM=0 (vectorbt still uses numba internally).
 import os as _os
 
-_FORCE_NO_NUMBA = _os.getenv("USE_NUMBA_CUSTOM", "0") == "0"
-
-if _FORCE_NO_NUMBA:
-    _HAS_NUMBA = False
-
-    def _njit(*args, **kwargs):  # noqa: ARG001
-        """No-op decorator — using pure-numpy path."""
-        def _wrap(fn):
-            return fn
-        if args and callable(args[0]):
-            return args[0]
-        return _wrap
-else:
-    try:
-        from numba import njit as _njit
-        _HAS_NUMBA = True
-    except ImportError:
-        _HAS_NUMBA = False
-
-        def _njit(*args, **kwargs):  # noqa: ARG001
-            def _wrap(fn):
-                return fn
-            if args and callable(args[0]):
-                return args[0]
-            return _wrap
+_HAS_NUMBA = False
 
 try:
     import talib as _talib
@@ -51,24 +22,62 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# Numba-accelerated kernels (with pure-numpy fallbacks)
+# Pure-numpy indicator implementations
 # ---------------------------------------------------------------------------
 
-@_njit(cache=True)
-def _vwap_nb(high: np.ndarray, low: np.ndarray, close: np.ndarray, volume: np.ndarray) -> np.ndarray:
+def _sma(values: np.ndarray, window: int) -> np.ndarray:
+    out = np.full(len(values), np.nan)
+    if len(values) < window:
+        return out
+    cs = np.cumsum(values)
+    out[window - 1] = cs[window - 1] / window
+    out[window:] = (cs[window:] - cs[:-window]) / window
+    return out
+
+
+def _ema(values: np.ndarray, window: int) -> np.ndarray:
+    alpha = 2.0 / (window + 1)
+    out = np.empty(len(values))
+    out[:] = np.nan
+    first_valid = window - 1
+    if first_valid >= len(values):
+        return out
+    out[first_valid] = np.mean(values[:window])
+    for i in range(first_valid + 1, len(values)):
+        out[i] = alpha * values[i] + (1 - alpha) * out[i - 1]
+    return out
+
+
+def _rsi(close: np.ndarray, window: int) -> np.ndarray:
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_gain = _ema(gain, window)
+    avg_loss = _ema(loss, window)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rs = avg_gain / np.where(avg_loss != 0, avg_loss, np.nan)
+        rsi = 100.0 - 100.0 / (1.0 + rs)
+    out = np.full(len(close), np.nan)
+    out[1:] = rsi
+    return out
+
+
+def _macd(close: np.ndarray, fast: int = 12, slow: int = 26) -> np.ndarray:
+    ema_fast = _ema(close, fast)
+    ema_slow = _ema(close, slow)
+    return ema_fast - ema_slow
+
+
+def _atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, window: int) -> np.ndarray:
     n = len(close)
-    result = np.empty(n, dtype=np.float64)
-    cum_tp_vol = 0.0
-    cum_vol = 0.0
-    for i in range(n):
-        tp = (high[i] + low[i] + close[i]) / 3.0
-        cum_tp_vol += tp * volume[i]
-        cum_vol += volume[i]
-        result[i] = cum_tp_vol / cum_vol if cum_vol != 0 else np.nan
-    return result
+    tr = np.empty(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i - 1]), abs(low[i] - close[i - 1]))
+    return _ema(tr, window)
 
 
-def _vwap_pure(high: np.ndarray, low: np.ndarray, close: np.ndarray, volume: np.ndarray) -> np.ndarray:
+def _vwap(high: np.ndarray, low: np.ndarray, close: np.ndarray, volume: np.ndarray) -> np.ndarray:
     typical = (high + low + close) / 3.0
     cum_tp_vol = np.cumsum(typical * volume)
     cum_vol = np.cumsum(volume)
@@ -76,9 +85,7 @@ def _vwap_pure(high: np.ndarray, low: np.ndarray, close: np.ndarray, volume: np.
         return np.where(cum_vol != 0, cum_tp_vol / cum_vol, np.nan)
 
 
-@_njit(cache=True)
-def _consecutive_count_nb(signal: np.ndarray) -> np.ndarray:
-    """Count consecutive True values in a boolean signal array."""
+def _consecutive_count(signal: np.ndarray) -> np.ndarray:
     n = len(signal)
     result = np.zeros(n, dtype=np.float64)
     count = 0.0
@@ -91,71 +98,18 @@ def _consecutive_count_nb(signal: np.ndarray) -> np.ndarray:
     return result
 
 
-def _consecutive_count_pure(signal: np.ndarray) -> np.ndarray:
-    s = signal.astype(np.int64)
-    n = len(s)
-    result = np.zeros(n, dtype=np.float64)
-    count = 0.0
-    for i in range(n):
-        if s[i]:
-            count += 1.0
-        else:
-            count = 0.0
-        result[i] = count
-    return result
-
-
-@_njit(cache=True)
-def _hammer_nb(
-    open_: np.ndarray, high: np.ndarray, low: np.ndarray, close: np.ndarray
-) -> np.ndarray:
-    n = len(close)
-    result = np.empty(n, dtype=np.bool_)
-    for i in range(n):
-        body = abs(close[i] - open_[i])
-        full_range = high[i] - low[i] + 1e-10
-        lower_wick = min(open_[i], close[i]) - low[i]
-        result[i] = (lower_wick >= 2 * body) and (body / full_range < 0.4)
-    return result
-
-
-def _hammer_pure(
-    open_: np.ndarray, high: np.ndarray, low: np.ndarray, close: np.ndarray
-) -> np.ndarray:
+def _hammer(open_: np.ndarray, high: np.ndarray, low: np.ndarray, close: np.ndarray) -> np.ndarray:
     body = np.abs(close - open_)
     full_range = high - low + 1e-10
     lower_wick = np.minimum(open_, close) - low
     return (lower_wick >= 2 * body) & (body / full_range < 0.4)
 
 
-@_njit(cache=True)
-def _shooting_star_nb(
-    open_: np.ndarray, high: np.ndarray, low: np.ndarray, close: np.ndarray
-) -> np.ndarray:
-    n = len(close)
-    result = np.empty(n, dtype=np.bool_)
-    for i in range(n):
-        body = abs(close[i] - open_[i])
-        full_range = high[i] - low[i] + 1e-10
-        upper_wick = high[i] - max(open_[i], close[i])
-        result[i] = (upper_wick >= 2 * body) and (body / full_range < 0.4)
-    return result
-
-
-def _shooting_star_pure(
-    open_: np.ndarray, high: np.ndarray, low: np.ndarray, close: np.ndarray
-) -> np.ndarray:
+def _shooting_star(open_: np.ndarray, high: np.ndarray, low: np.ndarray, close: np.ndarray) -> np.ndarray:
     body = np.abs(close - open_)
     full_range = high - low + 1e-10
     upper_wick = high - np.maximum(open_, close)
     return (upper_wick >= 2 * body) & (body / full_range < 0.4)
-
-
-# Dispatch: use numba when available, pure numpy otherwise
-_vwap = _vwap_nb if _HAS_NUMBA else _vwap_pure
-_consecutive_count = _consecutive_count_nb if _HAS_NUMBA else _consecutive_count_pure
-_hammer = _hammer_nb if _HAS_NUMBA else _hammer_pure
-_shooting_star = _shooting_star_nb if _HAS_NUMBA else _shooting_star_pure
 
 
 # ---------------------------------------------------------------------------
@@ -170,13 +124,6 @@ def compute_indicator(
     daily_stats: dict | None = None,
     cache: dict | None = None,
 ) -> pd.Series:
-    """
-    Compute a single indicator series from OHLCV DataFrame.
-
-    df must have columns: open, high, low, close, volume, timestamp
-    daily_stats provides pre-computed values like pm_high, pm_low, previous_close etc.
-    cache: optional dict keyed by (name, period, offset) to avoid redundant computation.
-    """
     cache_key = (name, period, offset)
     if cache is not None and cache_key in cache:
         return cache[cache_key]
@@ -198,16 +145,6 @@ def compute_indicator(
     return result
 
 
-def _to_series(result, index) -> pd.Series:
-    """Convert vectorbt output (may be DataFrame or Series) to a plain Series."""
-    if isinstance(result, pd.DataFrame):
-        vals = result.iloc[:, 0].values
-        return pd.Series(vals, index=index)
-    if isinstance(result, pd.Series):
-        return pd.Series(result.values, index=index)
-    return pd.Series(result, index=index)
-
-
 def _compute_raw(
     name: str,
     close: pd.Series,
@@ -221,7 +158,6 @@ def _compute_raw(
 ) -> pd.Series:
     ds = daily_stats or {}
 
-    # --- Price series (direct) ---
     if name == "Close":
         return close
     if name == "Open":
@@ -233,19 +169,17 @@ def _compute_raw(
     if name == "Volume":
         return volume.astype(float)
 
-    # --- Built-in vectorbt indicators ---
     if name == "SMA":
-        return _to_series(vbt.MA.run(close, window=period or 20, ewm=False).ma, close.index)
+        return pd.Series(_sma(close.values, period or 20), index=close.index)
     if name == "EMA":
-        return _to_series(vbt.MA.run(close, window=period or 20, ewm=True).ma, close.index)
+        return pd.Series(_ema(close.values, period or 20), index=close.index)
     if name == "RSI":
-        return _to_series(vbt.RSI.run(close, window=period or 14).rsi, close.index)
+        return pd.Series(_rsi(close.values, period or 14), index=close.index)
     if name == "MACD":
-        return _to_series(vbt.MACD.run(close).macd, close.index)
+        return pd.Series(_macd(close.values), index=close.index)
     if name == "ATR":
-        return _to_series(vbt.ATR.run(high, low, close, window=period or 14).atr, close.index)
+        return pd.Series(_atr(high.values, low.values, close.values, period or 14), index=close.index)
 
-    # --- TA-Lib (fast C) with pandas_ta fallback ---
     if name == "WMA":
         if _talib is not None:
             return pd.Series(_talib.WMA(close.values, timeperiod=period or 20), index=close.index)
@@ -269,12 +203,10 @@ def _compute_raw(
         if ta is not None:
             return ta.willr(high, low, close, length=period or 14)
 
-    # --- VWAP / AVWAP ---
     if name in ("VWAP", "AVWAP"):
         vals = _vwap(high.values, low.values, close.values, volume.values.astype(np.float64))
         return pd.Series(vals, index=close.index)
 
-    # --- Level indicators (scalar values broadcast to series) ---
     if name == "Pre-Market High":
         return pd.Series(ds.get("pm_high", np.nan), index=close.index)
     if name == "Pre-Market Low":
@@ -290,7 +222,6 @@ def _compute_raw(
     if name == "Yesterday Close":
         return pd.Series(ds.get("previous_close", np.nan), index=close.index)
 
-    # --- Custom computed (numba-accelerated when available) ---
     if name == "Accumulated Volume":
         return volume.cumsum().astype(float)
     if name == "Consecutive Red Candles":
@@ -333,7 +264,6 @@ def detect_candle_pattern(
     lookback: int = 0,
     consecutive_count: int = 1,
 ) -> pd.Series:
-    """Detect candle pattern and return boolean Series."""
     close = df["close"].values
     open_ = df["open"].values
     high = df["high"].values
