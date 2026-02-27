@@ -153,12 +153,6 @@ def run_backtest(
         timestamps = pd.Series(pd.to_datetime(arrays["timestamp"]))
         ts_epoch = timestamps.values.astype("datetime64[s]").astype("int64")
 
-        candles_dict = {
-            "ticker": ticker,
-            "date": date,
-            "candles": _build_candles(ts_epoch, arrays),
-        }
-
         trades_records = _enrich_trades(raw_trades, timestamps, ticker, date, strategy_def)
 
         equity = _extract_equity_from_values(eq_vals, timestamps)
@@ -166,9 +160,15 @@ def run_backtest(
 
         stats = _extract_day_stats_from_values(eq_vals, ticker, date, trades_records)
 
-        all_candles.append(candles_dict)
+        if days_with_entries < _MAX_CANDLE_DAYS:
+            all_candles.append({
+                "ticker": ticker,
+                "date": date,
+                "candles": _build_candles(ts_epoch, arrays),
+            })
+            all_equity.append(equity_dict)
+
         all_trades.extend(trades_records)
-        all_equity.append(equity_dict)
         day_results.append(stats)
         days_with_entries += 1
 
@@ -325,6 +325,7 @@ def _compute_r_multiple(
 # Equity extraction
 # ---------------------------------------------------------------------------
 
+_MAX_CANDLE_DAYS = 150
 _MAX_EQUITY_POINTS = 500
 
 
