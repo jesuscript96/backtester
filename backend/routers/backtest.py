@@ -5,7 +5,7 @@ import time
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from backend.services.data_service import get_strategy, fetch_dataset_data
+from backend.services.data_service import get_strategy, fetch_dataset_data, fetch_day_candles
 from backend.services.backtest_service import run_backtest
 from backend.services.montecarlo_service import run_montecarlo
 
@@ -93,6 +93,14 @@ def run_backtest_endpoint(req: BacktestRequest):
         raise HTTPException(status_code=500, detail=f"Error en backtest: {str(e)}")
 
     return results
+
+
+@router.get("/candles")
+def get_candles(dataset_id: str, ticker: str, date: str):
+    candles = fetch_day_candles(dataset_id, ticker, date)
+    if not candles:
+        raise HTTPException(status_code=404, detail="No candle data found")
+    return {"ticker": ticker, "date": date, "candles": candles}
 
 
 @router.post("/montecarlo")

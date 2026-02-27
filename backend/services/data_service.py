@@ -202,3 +202,28 @@ def fetch_dataset_data(dataset_id: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     # #endregion
 
     return qualifying, intraday
+
+
+def fetch_day_candles(dataset_id: str, ticker: str, date: str) -> list[dict]:
+    sql = """
+    SELECT i."timestamp", i.open, i.high, i.low, i."close", i.volume
+    FROM intraday_1m i
+    INNER JOIN dataset_pairs dp ON i.ticker = dp.ticker AND i.date = dp.date
+    WHERE dp.dataset_id = ? AND i.ticker = ? AND i.date = ?
+    ORDER BY i."timestamp"
+    """
+    df = query_df(sql, [dataset_id, ticker, date])
+    if df.empty:
+        return []
+    ts = pd.to_datetime(df["timestamp"]).values.astype("datetime64[s]").astype("int64")
+    return [
+        {
+            "time": int(ts[j]),
+            "open": float(df.iloc[j]["open"]),
+            "high": float(df.iloc[j]["high"]),
+            "low": float(df.iloc[j]["low"]),
+            "close": float(df.iloc[j]["close"]),
+            "volume": int(df.iloc[j]["volume"]),
+        }
+        for j in range(len(df))
+    ]

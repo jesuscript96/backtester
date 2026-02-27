@@ -1,9 +1,9 @@
 "use client";
 
-import type { DayCandles } from "@/lib/api";
+import type { DayResult } from "@/lib/api";
 
 interface DaySelectorProps {
-  days: DayCandles[];
+  days: DayResult[];
   selectedIdx: number;
   onSelect: (idx: number) => void;
 }
@@ -16,7 +16,7 @@ export default function DaySelector({ days, selectedIdx, onSelect }: DaySelector
       <h2 className="text-xs font-semibold uppercase tracking-wide text-[var(--muted)] mb-2">
         Dias ({days.length})
       </h2>
-      <div className="flex flex-wrap gap-1.5">
+      <div className="flex flex-wrap gap-1.5 max-h-60 overflow-y-auto">
         {days.map((d, i) => (
           <button
             key={`${d.ticker}-${d.date}`}

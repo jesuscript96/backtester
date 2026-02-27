@@ -1,12 +1,17 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import BacktestPanel from "@/components/BacktestPanel";
 import Chart from "@/components/Chart";
 import MetricsCard from "@/components/MetricsCard";
 import ResultsTabs from "@/components/ResultsTabs";
 import DaySelector from "@/components/DaySelector";
-import { runBacktest, type BacktestResult } from "@/lib/api";
+import {
+  runBacktest,
+  fetchDayCandles,
+  type BacktestResult,
+  type DayCandles,
+} from "@/lib/api";
 
 export default function Home() {
   const [result, setResult] = useState<BacktestResult | null>(null);
@@ -15,6 +20,10 @@ export default function Home() {
   const [selectedDay, setSelectedDay] = useState(0);
   const initCashRef = useRef(10000);
   const riskRRef = useRef(100);
+  const datasetIdRef = useRef("");
+
+  const [dayCandles, setDayCandles] = useState<DayCandles | null>(null);
+  const [candlesLoading, setCandlesLoading] = useState(false);
 
   const handleRun = async (params: {
     dataset_id: string;
@@ -28,8 +37,10 @@ export default function Home() {
     setError(null);
     setResult(null);
     setSelectedDay(0);
+    setDayCandles(null);
     initCashRef.current = params.init_cash;
     riskRRef.current = params.risk_r;
+    datasetIdRef.current = params.dataset_id;
 
     try {
       const data = await runBacktest(params);
@@ -44,7 +55,7 @@ export default function Home() {
         if (errMsg.includes("timeout")) {
           msg = "Timeout: el backtest tardo demasiado. Prueba con un dataset mas pequeno.";
         } else if (errMsg.includes("Network")) {
-          msg = "Error de red: verifica que el backend este corriendo en localhost:8000";
+          msg = "Error de red: verifica que el backend este corriendo.";
         } else {
           msg = errMsg;
         }
@@ -55,13 +66,48 @@ export default function Home() {
     }
   };
 
-  const currentCandles = result?.candles?.[selectedDay];
-  const currentEquity = result?.equity_curves?.[selectedDay];
+  const loadCandles = useCallback(
+    async (dayIdx: number) => {
+      if (!result || !datasetIdRef.current) return;
+      const day = result.day_results[dayIdx];
+      if (!day) return;
+
+      setCandlesLoading(true);
+      setDayCandles(null);
+      try {
+        const data = await fetchDayCandles(
+          datasetIdRef.current,
+          day.ticker,
+          day.date
+        );
+        setDayCandles(data);
+      } catch {
+        setDayCandles(null);
+      } finally {
+        setCandlesLoading(false);
+      }
+    },
+    [result]
+  );
+
+  useEffect(() => {
+    if (result && result.day_results.length > 0) {
+      loadCandles(selectedDay);
+    }
+  }, [result, selectedDay, loadCandles]);
+
+  const selectedDayResult = result?.day_results?.[selectedDay];
+  const currentEquity = result?.equity_curves?.find(
+    (e) =>
+      selectedDayResult &&
+      e.ticker === selectedDayResult.ticker &&
+      e.date === selectedDayResult.date
+  );
   const currentTrades = result?.trades?.filter(
     (t) =>
-      currentCandles &&
-      t.ticker === currentCandles.ticker &&
-      t.date === currentCandles.date
+      selectedDayResult &&
+      t.ticker === selectedDayResult.ticker &&
+      t.date === selectedDayResult.date
   );
 
   return (
@@ -81,7 +127,7 @@ export default function Home() {
 
           {result && (
             <DaySelector
-              days={result.candles}
+              days={result.day_results}
               selectedIdx={selectedDay}
               onSelect={setSelectedDay}
             />
@@ -124,13 +170,25 @@ export default function Home() {
             <>
               <MetricsCard metrics={result.aggregate_metrics} />
 
-              {currentCandles && currentCandles.candles.length > 0 && (
+              {candlesLoading && (
+                <div className="bg-white rounded-lg border border-[var(--border)] p-8 flex items-center justify-center">
+                  <div className="text-center space-y-2">
+                    <svg className="animate-spin h-6 w-6 text-[var(--accent)] mx-auto" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    <p className="text-xs text-[var(--muted)]">Cargando chart...</p>
+                  </div>
+                </div>
+              )}
+
+              {!candlesLoading && dayCandles && dayCandles.candles.length > 0 && (
                 <Chart
-                  candles={currentCandles.candles}
+                  candles={dayCandles.candles}
                   trades={currentTrades || []}
                   equity={currentEquity?.equity || []}
-                  ticker={currentCandles.ticker}
-                  date={currentCandles.date}
+                  ticker={dayCandles.ticker}
+                  date={dayCandles.date}
                 />
               )}
 

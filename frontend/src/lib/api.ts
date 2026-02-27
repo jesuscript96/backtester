@@ -108,7 +108,6 @@ export interface DrawdownPoint {
 export interface BacktestResult {
   aggregate_metrics: AggregateMetrics;
   day_results: DayResult[];
-  candles: DayCandles[];
   trades: TradeRecord[];
   equity_curves: DayEquity[];
   global_equity: GlobalEquityPoint[];
@@ -156,5 +155,16 @@ export async function runBacktest(params: {
   slippage?: number;
 }): Promise<BacktestResult> {
   const { data } = await api.post("/backtest", params);
+  return data;
+}
+
+export async function fetchDayCandles(
+  dataset_id: string,
+  ticker: string,
+  date: string
+): Promise<DayCandles> {
+  const { data } = await api.get("/candles", {
+    params: { dataset_id, ticker, date },
+  });
   return data;
 }

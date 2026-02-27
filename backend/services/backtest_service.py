@@ -78,7 +78,6 @@ def run_backtest(
     # #endregion
 
     all_trades: list[dict] = []
-    all_candles: list[dict] = []
     all_equity: list[dict] = []
     day_results: list[dict] = []
     days_with_entries = 0
@@ -156,18 +155,10 @@ def run_backtest(
         trades_records = _enrich_trades(raw_trades, timestamps, ticker, date, strategy_def)
 
         equity = _extract_equity_from_values(eq_vals, timestamps)
-        equity_dict = {"ticker": ticker, "date": date, "equity": equity}
 
         stats = _extract_day_stats_from_values(eq_vals, ticker, date, trades_records)
 
-        if days_with_entries < _MAX_CANDLE_DAYS:
-            all_candles.append({
-                "ticker": ticker,
-                "date": date,
-                "candles": _build_candles(ts_epoch, arrays),
-            })
-            all_equity.append(equity_dict)
-
+        all_equity.append({"ticker": ticker, "date": date, "equity": equity})
         all_trades.extend(trades_records)
         day_results.append(stats)
         days_with_entries += 1
@@ -198,7 +189,7 @@ def run_backtest(
     # #region agent log (debug-d20cd9)
     _dbg("backtest_service.py:stream_done", "stream finished", {
         "days_with_entries": days_with_entries, "total_trades": len(all_trades),
-        "total_candles": len(all_candles), "rss_mb": _rss_mb(),
+        "total_equity": len(all_equity), "rss_mb": _rss_mb(),
         "elapsed_s": round(time.time() - t1, 2)
     }, "H-A")
     # #endregion
@@ -210,8 +201,8 @@ def run_backtest(
     # #region agent log (debug-d20cd9)
     _dbg("backtest_service.py:before_return", "about to return result", {
         "rss_mb": _rss_mb(), "n_day_results": len(day_results),
-        "n_all_trades": len(all_trades), "n_all_candles": len(all_candles),
-        "n_all_equity": len(all_equity), "total_elapsed_s": round(time.time() - t_total, 2)
+        "n_all_trades": len(all_trades), "n_all_equity": len(all_equity),
+        "total_elapsed_s": round(time.time() - t_total, 2)
     }, "H-C")
     # #endregion
 
@@ -223,7 +214,6 @@ def run_backtest(
     return {
         "aggregate_metrics": aggregate,
         "day_results": day_results,
-        "candles": all_candles,
         "trades": all_trades,
         "equity_curves": all_equity,
         "global_equity": global_eq,
@@ -325,8 +315,7 @@ def _compute_r_multiple(
 # Equity extraction
 # ---------------------------------------------------------------------------
 
-_MAX_CANDLE_DAYS = 150
-_MAX_EQUITY_POINTS = 500
+_MAX_EQUITY_POINTS = 200
 
 
 def _extract_equity_from_values(eq_vals: np.ndarray, timestamps: pd.Series) -> list[dict]:
