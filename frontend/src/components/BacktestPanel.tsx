@@ -24,26 +24,35 @@ export default function BacktestPanel({ onRun, loading }: BacktestPanelProps) {
   const [fees, setFees] = useState(0);
   const [slippage, setSlippage] = useState(0);
   const [loadingData, setLoadingData] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+
+  const loadData = async () => {
+    setLoadingData(true);
+    setLoadError(false);
+    let failed = false;
+    try {
+      const d = await fetchDatasets();
+      setDatasets(d);
+      if (d.length > 0) setSelectedDataset(d[0].id);
+    } catch (e) {
+      console.error("Error loading datasets:", e);
+      failed = true;
+    }
+    try {
+      const s = await fetchStrategies();
+      setStrategies(s);
+      if (s.length > 0) setSelectedStrategy(s[0].id);
+    } catch (e) {
+      console.error("Error loading strategies:", e);
+      failed = true;
+    }
+    setLoadError(failed);
+    setLoadingData(false);
+  };
 
   useEffect(() => {
-    async function load() {
-      try {
-        const d = await fetchDatasets();
-        setDatasets(d);
-        if (d.length > 0) setSelectedDataset(d[0].id);
-      } catch (e) {
-        console.error("Error loading datasets:", e);
-      }
-      try {
-        const s = await fetchStrategies();
-        setStrategies(s);
-        if (s.length > 0) setSelectedStrategy(s[0].id);
-      } catch (e) {
-        console.error("Error loading strategies:", e);
-      }
-      setLoadingData(false);
-    }
-    load();
+    loadData();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleRun = () => {
@@ -65,6 +74,18 @@ export default function BacktestPanel({ onRun, loading }: BacktestPanelProps) {
       <h2 className="text-sm font-semibold uppercase tracking-wide text-[var(--muted)]">
         Configuracion
       </h2>
+
+      {loadError && (
+        <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-md px-3 py-2">
+          <span className="text-xs text-red-600 flex-1">Error al conectar con el servidor</span>
+          <button
+            onClick={loadData}
+            className="text-xs font-medium text-red-700 underline hover:no-underline"
+          >
+            Reintentar
+          </button>
+        </div>
+      )}
 
       <div className="space-y-3">
         <div>
