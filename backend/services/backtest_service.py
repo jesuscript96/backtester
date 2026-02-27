@@ -66,6 +66,10 @@ def run_backtest(
     slippage: float = 0.0,
 ) -> dict:
     t_total = time.time()
+
+    qual_lookup = _build_qualifying_lookup(qualifying_df)
+    del qualifying_df
+
     grouped = intraday_df.groupby(["ticker", "date"])
     n_groups = grouped.ngroups
     logger.info(f"[INIT] groupby done, {n_groups} groups")
@@ -73,45 +77,32 @@ def run_backtest(
     _dbg("backtest_service.py:run_backtest:groupby", "after groupby", {"n_groups": n_groups, "rss_mb": _rss_mb(), "intraday_rows": len(intraday_df)}, "H-B")
     # #endregion
 
-    qual_lookup = _build_qualifying_lookup(qualifying_df)
-
-    day_items: list[tuple | None] = []
-    for (ticker, date), day_df in grouped:
-        day_df = day_df.sort_values("timestamp").reset_index(drop=True)
-        if len(day_df) < 5:
-            continue
-        day_items.append((
-            ticker,
-            str(date)[:10],
-            {
-                "open": day_df["open"].values,
-                "high": day_df["high"].values,
-                "low": day_df["low"].values,
-                "close": day_df["close"].values,
-                "volume": day_df["volume"].values,
-                "timestamp": day_df["timestamp"].values,
-            },
-            qual_lookup.get((ticker, date), {}),
-        ))
-
-    del grouped, intraday_df, qualifying_df, qual_lookup
-    gc.collect()
-    _release_memory()
-    logger.info(f"[INIT] extracted {len(day_items)} days to numpy, big DFs freed")
-    # #region agent log (debug-d20cd9)
-    _dbg("backtest_service.py:run_backtest:extracted", "after DF freed", {"n_days": len(day_items), "rss_mb": _rss_mb()}, "H-B")
-    # #endregion
-
     all_trades: list[dict] = []
     all_candles: list[dict] = []
     all_equity: list[dict] = []
     day_results: list[dict] = []
     days_with_entries = 0
+    scanned = 0
     t1 = time.time()
 
-    for i in range(len(day_items)):
-        ticker, date, arrays, daily_stats = day_items[i]
-        day_items[i] = None
+    for (ticker_raw, date_raw), day_df in grouped:
+        scanned += 1
+        day_df = day_df.sort_values("timestamp").reset_index(drop=True)
+        if len(day_df) < 5:
+            continue
+
+        ticker = ticker_raw
+        date = str(date_raw)[:10]
+        arrays = {
+            "open": day_df["open"].values,
+            "high": day_df["high"].values,
+            "low": day_df["low"].values,
+            "close": day_df["close"].values,
+            "volume": day_df["volume"].values,
+            "timestamp": day_df["timestamp"].values,
+        }
+        daily_stats = qual_lookup.get((ticker_raw, date_raw), {})
+        del day_df
 
         mini_df = pd.DataFrame(arrays)
 
@@ -186,17 +177,17 @@ def run_backtest(
         if days_with_entries % 20 == 0:
             logger.info(
                 f"[STREAM] {days_with_entries} days processed, "
-                f"{i+1}/{len(day_items)} scanned ({round(time.time()-t1, 2)}s)"
+                f"{scanned}/{n_groups} scanned ({round(time.time()-t1, 2)}s)"
             )
             # #region agent log (debug-d20cd9)
             _dbg("backtest_service.py:stream_loop", "stream progress", {
-                "days_with_entries": days_with_entries, "scanned": i + 1,
+                "days_with_entries": days_with_entries, "scanned": scanned,
                 "rss_mb": _rss_mb(), "n_trades": len(all_trades),
                 "n_candles": len(all_candles), "elapsed_s": round(time.time() - t1, 2)
             }, "H-A")
             # #endregion
 
-    del day_items
+    del grouped, intraday_df, qual_lookup
     gc.collect()
     _release_memory()
     logger.info(

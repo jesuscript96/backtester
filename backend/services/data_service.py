@@ -159,4 +159,10 @@ def fetch_dataset_data(dataset_id: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     t_i = time.time()
     logger.info(f"intraday query: {len(intraday)} rows ({round(t_i - t_q, 2)}s)")
 
+    for col in ("open", "high", "low", "close"):
+        if col in intraday.columns:
+            intraday[col] = intraday[col].astype("float32")
+    if "volume" in intraday.columns:
+        intraday["volume"] = intraday["volume"].astype("int32")
+
     return qualifying, intraday
