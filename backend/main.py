@@ -32,28 +32,6 @@ def on_startup():
     logger.info("=== BacktesterMVP starting ===")
     logger.info(f"ALLOWED_ORIGINS = {ALLOWED_ORIGINS}")
     logger.info("Engine: pure numpy (no vectorbt)")
-    # #region agent log
-    import resource, sys, json, os
-    try:
-        ru = resource.getrusage(resource.RUSAGE_SELF)
-        rss = ru.ru_maxrss / (1024*1024) if sys.platform == "darwin" else ru.ru_maxrss / 1024
-    except Exception:
-        rss = -1
-    try:
-        with open('/proc/self/status') as f:
-            for line in f:
-                if line.startswith('VmRSS:'):
-                    rss = int(line.split()[1]) / 1024
-    except Exception:
-        pass
-    logger.info(f"[DBG:A] startup_memory | RSS={round(rss,1)}MB")
-    try:
-        lp = os.path.join(os.path.dirname(__file__), '..', '.cursor', 'debug-568c25.log')
-        with open(lp, 'a') as f:
-            f.write(json.dumps({"sessionId":"568c25","location":"main.py","message":"startup_memory","data":{"rss_mb":round(rss,1)},"timestamp":int(time.time()*1000),"hypothesisId":"A"})+'\n')
-    except Exception:
-        pass
-    # #endregion
 
 
 @app.middleware("http")

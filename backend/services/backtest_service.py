@@ -9,10 +9,7 @@ Memory-optimised streaming architecture:
 
 import ctypes
 import gc
-import json
 import logging
-import os
-import resource
 import sys
 import time
 
@@ -24,29 +21,6 @@ from backend.services.portfolio_sim import simulate
 
 logger = logging.getLogger("backtester.engine")
 
-# #region agent log
-_DEBUG_LOG = os.path.join(os.path.dirname(__file__), '..', '..', '.cursor', 'debug-568c25.log')
-def _mem_mb():
-    try:
-        with open('/proc/self/status') as f:
-            for line in f:
-                if line.startswith('VmRSS:'):
-                    return int(line.split()[1]) / 1024
-    except Exception:
-        pass
-    ru = resource.getrusage(resource.RUSAGE_SELF)
-    return ru.ru_maxrss / (1024*1024) if sys.platform == "darwin" else ru.ru_maxrss / 1024
-def _dbg(msg, data=None, hyp="A"):
-    mem = round(_mem_mb(), 1)
-    data = data or {}
-    data["rss_mb"] = mem
-    logger.info(f"[DBG:{hyp}] {msg} | RSS={mem}MB | {data}")
-    try:
-        with open(_DEBUG_LOG, 'a') as f:
-            f.write(json.dumps({"sessionId":"568c25","location":"backtest_service.py","message":msg,"data":data,"timestamp":int(time.time()*1000),"hypothesisId":hyp})+'\n')
-    except Exception:
-        pass
-# #endregion
 
 
 def _release_memory():
@@ -66,9 +40,6 @@ def run_backtest(
     slippage: float = 0.0,
 ) -> dict:
     t_total = time.time()
-    # #region agent log
-    _dbg("backtest_start", {"init_cash": init_cash, "intraday_rows": len(intraday_df)}, "A")
-    # #endregion
     grouped = intraday_df.groupby(["ticker", "date"])
     n_groups = grouped.ngroups
     logger.info(f"[INIT] groupby done, {n_groups} groups")
@@ -98,9 +69,6 @@ def run_backtest(
     gc.collect()
     _release_memory()
     logger.info(f"[INIT] extracted {len(day_items)} days to numpy, big DFs freed")
-    # #region agent log
-    _dbg("pass1_done_dfs_freed", {"n_days": len(day_items)}, "A")
-    # #endregion
 
     all_trades: list[dict] = []
     all_candles: list[dict] = []
@@ -112,10 +80,6 @@ def run_backtest(
     for i in range(len(day_items)):
         ticker, date, arrays, daily_stats = day_items[i]
         day_items[i] = None
-        # #region agent log
-        if i % 20 == 0:
-            _dbg(f"pass2_day_{i}", {"ticker": ticker, "date": date, "bars": len(arrays["close"])}, "A")
-        # #endregion
 
         mini_df = pd.DataFrame(arrays)
 
@@ -162,15 +126,7 @@ def run_backtest(
             del sim_result
             continue
 
-        timestamps = pd.to_datetime(arrays["timestamp"])
-        # #region agent log
-        import json as _json6a, time as _time6a
-        try:
-            with open('/Users/jvch/Desktop/AutomatoWebs/BacktesterMVP/.cursor/debug-6a6030.log','a') as _f6a:
-                _f6a.write(_json6a.dumps({"sessionId":"6a6030","location":"backtest_service.py:165","message":"timestamps_type_after_to_datetime","data":{"type":str(type(timestamps)),"has_iloc":hasattr(timestamps,'iloc'),"len":len(timestamps)},"timestamp":int(_time6a.time()*1000),"hypothesisId":"A"})+'\n')
-        except Exception:
-            pass
-        # #endregion
+        timestamps = pd.Series(pd.to_datetime(arrays["timestamp"]))
         ts_epoch = (timestamps.astype("int64") // 10**9).values
 
         candles_dict = {
@@ -207,9 +163,6 @@ def run_backtest(
         f"[STREAM] done: {days_with_entries} days with entries "
         f"({round(time.time()-t1, 2)}s)"
     )
-    # #region agent log
-    _dbg("pass2_done", {"days_with_entries": days_with_entries, "n_trades": len(all_trades)}, "A")
-    # #endregion
 
     t4 = time.time()
     aggregate = _aggregate_metrics(day_results, all_trades)
@@ -220,9 +173,6 @@ def run_backtest(
         f"[DONE] {len(day_results)} days, {len(all_trades)} trades, "
         f"total={round(time.time()-t_total, 2)}s"
     )
-    # #region agent log
-    _dbg("backtest_done", {"n_days": len(day_results), "n_trades": len(all_trades), "elapsed": round(time.time()-t_total,2)}, "A")
-    # #endregion
 
     return {
         "aggregate_metrics": aggregate,
@@ -274,14 +224,6 @@ def _enrich_trades(
         return []
 
     max_idx = len(timestamps) - 1
-    # #region agent log
-    import json as _json6b, time as _time6b
-    try:
-        with open('/Users/jvch/Desktop/AutomatoWebs/BacktesterMVP/.cursor/debug-6a6030.log','a') as _f6b:
-            _f6b.write(_json6b.dumps({"sessionId":"6a6030","location":"backtest_service.py:_enrich_trades","message":"enrich_trades_timestamps_type","data":{"type":str(type(timestamps)),"has_iloc":hasattr(timestamps,'iloc'),"max_idx":max_idx,"n_trades":len(raw_trades)},"timestamp":int(_time6b.time()*1000),"hypothesisId":"A"})+'\n')
-    except Exception:
-        pass
-    # #endregion
     result = []
     for t in raw_trades:
         ei = min(t["entry_idx"], max_idx)
@@ -345,14 +287,6 @@ def _extract_equity_from_values(eq_vals: np.ndarray, timestamps: pd.Series) -> l
         n = min(len(eq_vals), len(timestamps))
         if n == 0:
             return []
-        # #region agent log
-        import json as _json6c, time as _time6c
-        try:
-            with open('/Users/jvch/Desktop/AutomatoWebs/BacktesterMVP/.cursor/debug-6a6030.log','a') as _f6c:
-                _f6c.write(_json6c.dumps({"sessionId":"6a6030","location":"backtest_service.py:_extract_equity","message":"extract_equity_timestamps_type","data":{"type":str(type(timestamps)),"has_iloc":hasattr(timestamps,'iloc'),"n":n},"timestamp":int(_time6c.time()*1000),"hypothesisId":"B"})+'\n')
-        except Exception:
-            pass
-        # #endregion
         ts_epoch = (timestamps.iloc[:n].astype("int64") // 10**9).values.astype(int)
         vals = eq_vals[:n].astype(np.float64)
         if n > _MAX_EQUITY_POINTS:
