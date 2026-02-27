@@ -7,6 +7,16 @@ import numpy as np
 import pandas as pd
 import vectorbt as vbt
 from backend.services.strategy_engine import translate_strategy
+# #region agent log
+import time as _time, json as _json
+_LOG = "/Users/jvch/Desktop/AutomatoWebs/BacktesterMVP/.cursor/debug-448660.log"
+def _dlog(msg, data=None, hid=""):
+    line = {"sessionId":"448660","hypothesisId":hid,"location":"backtest_service.py","message":msg,"data":data or {},"timestamp":int(_time.time()*1000)}
+    try:
+        with open(_LOG, "a") as f: f.write(_json.dumps(line)+"\n")
+    except: pass
+    print(f"[DBG-{hid}] {msg} {data or ''}")
+# #endregion
 
 
 def run_backtest(
@@ -28,6 +38,19 @@ def run_backtest(
 
     grouped = intraday_df.groupby(["ticker", "date"])
 
+    # #region agent log
+    _t_total_loop = _time.time()
+    _t_signals_sum = 0.0
+    _t_portfolio_sum = 0.0
+    _t_candles_sum = 0.0
+    _t_trades_sum = 0.0
+    _t_equity_sum = 0.0
+    _t_stats_sum = 0.0
+    _n_groups = 0
+    _n_processed = 0
+    _dlog("LOOP_START", {"total_groups": grouped.ngroups}, "HA")
+    # #endregion
+
     for (ticker, date), day_df in grouped:
         day_df = day_df.sort_values("timestamp").reset_index(drop=True)
         if len(day_df) < 5:
@@ -39,10 +62,16 @@ def run_backtest(
         ]
         daily_stats = daily_row.iloc[0].to_dict() if not daily_row.empty else {}
 
+        # #region agent log
+        _ts0 = _time.time()
+        # #endregion
         try:
             signals = translate_strategy(day_df, strategy_def, daily_stats)
         except Exception:
             continue
+        # #region agent log
+        _t_signals_sum += _time.time() - _ts0
+        # #endregion
 
         entries = signals["entries"]
         exits = signals["exits"]
@@ -53,6 +82,10 @@ def run_backtest(
 
         if not entries.any():
             continue
+
+        # #region agent log
+        _n_processed += 1
+        # #endregion
 
         close = day_df["close"].values
         open_ = day_df["open"].values
@@ -86,39 +119,79 @@ def run_backtest(
         if not signals.get("accept_reentries", False):
             pf_kwargs["accumulate"] = False
 
+        # #region agent log
+        _tp0 = _time.time()
+        # #endregion
         try:
             pf = vbt.Portfolio.from_signals(**pf_kwargs)
         except Exception as e:
             print(f"Error running backtest for {ticker} {date}: {e}")
             continue
+        # #region agent log
+        _t_portfolio_sum += _time.time() - _tp0
+        _tc0 = _time.time()
+        # #endregion
 
-        candles = []
-        for i, row in day_df.iterrows():
-            candles.append({
-                "time": int(pd.Timestamp(row["timestamp"]).timestamp()),
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "volume": int(row["volume"]),
-            })
+        ts_epoch = (pd.to_datetime(day_df["timestamp"]).astype("int64") // 10**9).values
+        candles = [
+            {"time": int(t), "open": float(o), "high": float(h), "low": float(l), "close": float(c), "volume": int(v)}
+            for t, o, h, l, c, v in zip(
+                ts_epoch, day_df["open"].values, day_df["high"].values,
+                day_df["low"].values, day_df["close"].values, day_df["volume"].values,
+            )
+        ]
 
+        # #region agent log
+        _t_candles_sum += _time.time() - _tc0
+        _ttr0 = _time.time()
+        # #endregion
         trades_records = _extract_trades(
             pf, timestamps, ticker, str(date), strategy_def, len(day_df)
         )
+        # #region agent log
+        _t_trades_sum += _time.time() - _ttr0
+        _te0 = _time.time()
+        # #endregion
         equity = _extract_equity(pf, timestamps)
+        # #region agent log
+        _t_equity_sum += _time.time() - _te0
+        _tst0 = _time.time()
+        # #endregion
 
-        stats = _extract_day_stats(pf, ticker, str(date))
+        stats = _extract_day_stats(pf, ticker, str(date), trades_records)
+        # #region agent log
+        _t_stats_sum += _time.time() - _tst0
+        # #endregion
 
         all_candles.append({"ticker": ticker, "date": str(date), "candles": candles})
         all_trades.extend(trades_records)
         all_equity.append({"ticker": ticker, "date": str(date), "equity": equity})
         day_results.append(stats)
 
+    # #region agent log
+    _dlog("LOOP_DONE", {
+        "total_loop_s": round(_time.time()-_t_total_loop, 2),
+        "groups_total": grouped.ngroups,
+        "groups_processed": _n_processed,
+        "signals_s": round(_t_signals_sum, 2),
+        "portfolio_s": round(_t_portfolio_sum, 2),
+        "candles_s": round(_t_candles_sum, 2),
+        "trades_extract_s": round(_t_trades_sum, 2),
+        "equity_extract_s": round(_t_equity_sum, 2),
+        "stats_s": round(_t_stats_sum, 2),
+    }, "HA")
+    # #endregion
+
     aggregate = _aggregate_metrics(day_results, all_trades)
+    # #region agent log
+    _tg0 = _time.time()
+    # #endregion
     global_eq, global_dd = _compute_global_equity_and_drawdown(
         all_equity, init_cash
     )
+    # #region agent log
+    _dlog("POST_PROCESS", {"global_eq_dd_s": round(_time.time()-_tg0, 2), "n_trades": len(all_trades), "n_day_results": len(day_results), "n_candles_groups": len(all_candles)}, "HD")
+    # #endregion
 
     return {
         "aggregate_metrics": aggregate,
@@ -300,28 +373,67 @@ def _compute_global_equity_and_drawdown(
     return global_equity, global_drawdown
 
 
-def _extract_day_stats(pf: vbt.Portfolio, ticker: str, date: str) -> dict:
+def _extract_day_stats(
+    pf: vbt.Portfolio, ticker: str, date: str, trades_records: list[dict]
+) -> dict:
     try:
-        stats = pf.stats(settings=dict(freq="1min"))
-        stats_dict = stats.to_dict() if hasattr(stats, "to_dict") else {}
+        eq = pf.value()
+        start_val = float(eq.iloc[0]) if hasattr(eq, "iloc") else float(eq[0])
+        end_val = float(eq.iloc[-1]) if hasattr(eq, "iloc") else float(eq[-1])
+        total_ret = (end_val / start_val - 1) * 100 if start_val > 0 else 0.0
+
+        eq_arr = np.asarray(eq, dtype=np.float64)
+        running_max = np.maximum.accumulate(eq_arr)
+        dd_pct = np.where(running_max > 0, (eq_arr / running_max - 1) * 100, 0.0)
+        max_dd = float(np.min(dd_pct))
+
+        n_trades = len(trades_records)
+        pnls = [t["pnl"] for t in trades_records]
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p <= 0]
+
+        win_rate = (len(wins) / n_trades * 100) if n_trades > 0 else 0.0
+        sum_wins = sum(wins) if wins else 0.0
+        sum_losses = abs(sum(losses)) if losses else 0.0
+        profit_factor = (sum_wins / sum_losses) if sum_losses > 0 else 0.0
+        expectancy = float(np.mean(pnls)) if pnls else 0.0
+
+        rets_pct = [t["return_pct"] for t in trades_records]
+        best_trade = max(rets_pct) if rets_pct else 0.0
+        worst_trade = min(rets_pct) if rets_pct else 0.0
+
+        bar_returns = np.diff(eq_arr) / np.where(eq_arr[:-1] != 0, eq_arr[:-1], 1.0)
+        std = float(np.std(bar_returns)) if len(bar_returns) > 1 else 0.0
+        mean_r = float(np.mean(bar_returns)) if len(bar_returns) > 0 else 0.0
+        ann_factor = np.sqrt(252 * 390)
+        sharpe = (mean_r / std * ann_factor) if std > 0 else 0.0
+        down_returns = bar_returns[bar_returns < 0]
+        down_std = float(np.std(down_returns)) if len(down_returns) > 1 else 0.0
+        sortino = (mean_r / down_std * ann_factor) if down_std > 0 else 0.0
     except Exception:
-        stats_dict = {}
+        return {
+            "ticker": ticker, "date": date,
+            "total_return_pct": 0, "max_drawdown_pct": 0, "win_rate_pct": 0,
+            "total_trades": 0, "profit_factor": 0, "sharpe_ratio": 0,
+            "sortino_ratio": 0, "expectancy": 0, "best_trade_pct": 0,
+            "worst_trade_pct": 0, "init_value": 0, "end_value": 0,
+        }
 
     return {
         "ticker": ticker,
         "date": date,
-        "total_return_pct": _safe_float(stats_dict.get("Total Return [%]")),
-        "max_drawdown_pct": _safe_float(stats_dict.get("Max Drawdown [%]")),
-        "win_rate_pct": _safe_float(stats_dict.get("Win Rate [%]")),
-        "total_trades": _safe_int(stats_dict.get("Total Trades")),
-        "profit_factor": _safe_float(stats_dict.get("Profit Factor")),
-        "sharpe_ratio": _safe_float(stats_dict.get("Sharpe Ratio")),
-        "sortino_ratio": _safe_float(stats_dict.get("Sortino Ratio")),
-        "expectancy": _safe_float(stats_dict.get("Expectancy")),
-        "best_trade_pct": _safe_float(stats_dict.get("Best Trade [%]")),
-        "worst_trade_pct": _safe_float(stats_dict.get("Worst Trade [%]")),
-        "init_value": _safe_float(stats_dict.get("Start Value")),
-        "end_value": _safe_float(stats_dict.get("End Value")),
+        "total_return_pct": _safe_float(total_ret),
+        "max_drawdown_pct": _safe_float(max_dd),
+        "win_rate_pct": _safe_float(win_rate),
+        "total_trades": n_trades,
+        "profit_factor": _safe_float(profit_factor),
+        "sharpe_ratio": _safe_float(sharpe),
+        "sortino_ratio": _safe_float(sortino),
+        "expectancy": _safe_float(expectancy),
+        "best_trade_pct": _safe_float(best_trade),
+        "worst_trade_pct": _safe_float(worst_trade),
+        "init_value": _safe_float(start_val),
+        "end_value": _safe_float(end_val),
     }
 
 

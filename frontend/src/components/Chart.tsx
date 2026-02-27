@@ -69,7 +69,10 @@ export default function Chart({ candles, trades, equity, ticker, date }: ChartPr
       wickUpColor: "#10b981",
     });
 
-    const candleData: CandlestickData<Time>[] = candles.map((c) => ({
+    const sorted = [...candles].sort((a, b) => a.time - b.time);
+    const deduped = sorted.filter((c, i) => i === 0 || c.time !== sorted[i - 1].time);
+
+    const candleData: CandlestickData<Time>[] = deduped.map((c) => ({
       time: c.time as Time,
       open: c.open,
       high: c.high,
@@ -89,7 +92,7 @@ export default function Chart({ candles, trades, equity, ticker, date }: ChartPr
     });
 
     volumeSeries.setData(
-      candles.map((c) => ({
+      deduped.map((c) => ({
         time: c.time as Time,
         value: c.volume,
         color: c.close >= c.open ? "rgba(16,185,129,0.3)" : "rgba(239,68,68,0.3)",
@@ -100,19 +103,19 @@ export default function Chart({ candles, trades, equity, ticker, date }: ChartPr
       const markers: SeriesMarker<Time>[] = [];
 
       for (const t of trades) {
-        if (t.entry_idx >= 0 && t.entry_idx < candles.length) {
+        if (t.entry_idx >= 0 && t.entry_idx < deduped.length) {
           const isLong = t.direction.toLowerCase().includes("long");
           markers.push({
-            time: candles[t.entry_idx].time as Time,
+            time: deduped[t.entry_idx].time as Time,
             position: isLong ? "belowBar" : "aboveBar",
             color: isLong ? "#10b981" : "#ef4444",
             shape: isLong ? "arrowUp" : "arrowDown",
             text: `${isLong ? "L" : "S"} $${t.entry_price.toFixed(2)}`,
           });
         }
-        if (t.exit_idx >= 0 && t.exit_idx < candles.length && t.status === "Closed") {
+        if (t.exit_idx >= 0 && t.exit_idx < deduped.length && t.status === "Closed") {
           markers.push({
-            time: candles[t.exit_idx].time as Time,
+            time: deduped[t.exit_idx].time as Time,
             position: "aboveBar",
             color: t.pnl >= 0 ? "#10b981" : "#ef4444",
             shape: "circle",
@@ -138,8 +141,10 @@ export default function Chart({ candles, trades, equity, ticker, date }: ChartPr
         scaleMargins: { top: 0, bottom: 0.7 },
       });
 
+      const eqSorted = [...equity].sort((a, b) => a.time - b.time);
+      const eqDeduped = eqSorted.filter((e, i) => i === 0 || e.time !== eqSorted[i - 1].time);
       equitySeries.setData(
-        equity.map((e) => ({ time: e.time as Time, value: e.value }))
+        eqDeduped.map((e) => ({ time: e.time as Time, value: e.value }))
       );
     }
 
