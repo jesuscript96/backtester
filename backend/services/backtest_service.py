@@ -53,7 +53,7 @@ def run_backtest(
             continue
         day_items.append((
             ticker,
-            str(date),
+            str(date)[:10],
             {
                 "open": day_df["open"].values,
                 "high": day_df["high"].values,
@@ -127,7 +127,7 @@ def run_backtest(
             continue
 
         timestamps = pd.Series(pd.to_datetime(arrays["timestamp"]))
-        ts_epoch = (timestamps.astype("int64") // 10**9).values
+        ts_epoch = timestamps.values.astype("datetime64[s]").astype("int64")
 
         candles_dict = {
             "ticker": ticker,
@@ -287,7 +287,7 @@ def _extract_equity_from_values(eq_vals: np.ndarray, timestamps: pd.Series) -> l
         n = min(len(eq_vals), len(timestamps))
         if n == 0:
             return []
-        ts_epoch = (timestamps.iloc[:n].astype("int64") // 10**9).values.astype(int)
+        ts_epoch = timestamps.iloc[:n].values.astype("datetime64[s]").astype("int64")
         vals = eq_vals[:n].astype(np.float64)
         if n > _MAX_EQUITY_POINTS:
             idx = np.linspace(0, n - 1, _MAX_EQUITY_POINTS, dtype=int)
@@ -315,7 +315,7 @@ def _compute_global_equity_and_drawdown(
         points = day_eq.get("equity", [])
         if not points:
             continue
-        day_vals = np.array([pt["value"] for pt in points])
+        day_vals = np.array([pt["value"] for pt in points], dtype=np.float64)
         day_start = day_vals[0]
         offset = carry - day_start + init_cash if not day_arrays else carry - day_start
         day_vals = day_vals + offset
@@ -326,11 +326,23 @@ def _compute_global_equity_and_drawdown(
         return [], []
 
     values = np.concatenate(day_arrays)
+
+    # #region agent log
+    import json as _json, os as _os
+    _log_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__))), ".cursor", "debug-d50eeb.log")
+    _payload = {"sessionId":"d50eeb","location":"backtest_service.py:_compute_global_equity_and_drawdown","message":"global equity post-fix values","hypothesisId":"post-fix","data":{"total_points":int(len(values)),"n_days":len(day_arrays),"first5_values":values[:5].tolist()},"timestamp":int(__import__("time").time()*1000)}
+    with open(_log_path, "a") as _f:
+        _f.write(_json.dumps(_payload) + "\n")
+    # #endregion
+
+    # Use sequential fake timestamps: global equity mixes multiple tickers on the
+    # same dates so real timestamps would overlap. timeVisible=false on this chart.
+    base_ts = 1_577_836_800  # 2020-01-01 00:00:00 UTC
+    times = base_ts + np.arange(len(values)) * 60
+
     running_max = np.maximum.accumulate(values)
     dd_pct = np.where(running_max > 0, (values / running_max - 1) * 100, 0.0)
 
-    base_ts = 1_000_000_000
-    times = base_ts + np.arange(len(values)) * 60
     values_rounded = np.round(values, 2)
     dd_rounded = np.round(dd_pct, 4)
 

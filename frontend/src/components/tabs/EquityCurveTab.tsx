@@ -70,6 +70,16 @@ export default function EquityCurveTab({ globalEquity, trades }: EquityCurveTabP
       bottomColor: "rgba(59,130,246,0.05)",
       lineWidth: 2,
     });
+    // #region agent log
+    const _eq = globalEquity;
+    const _dups: {idx: number, t: number, prev: number}[] = [];
+    const _nonMono: {idx: number, t: number, prev: number}[] = [];
+    for (let _i = 1; _i < _eq.length; _i++) {
+      if (_eq[_i].time === _eq[_i-1].time) _dups.push({idx: _i, t: _eq[_i].time, prev: _eq[_i-1].time});
+      if (_eq[_i].time < _eq[_i-1].time) _nonMono.push({idx: _i, t: _eq[_i].time, prev: _eq[_i-1].time});
+    }
+    fetch('http://127.0.0.1:7313/ingest/621ccf43-8399-497f-9568-7644af923671',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'d50eeb'},body:JSON.stringify({sessionId:'d50eeb',location:'EquityCurveTab.tsx:73',message:'globalEquity timestamps audit',runId:'post-fix',data:{total:_eq.length,first5:_eq.slice(0,5).map(p=>p.time),last5:_eq.slice(-5).map(p=>p.time),dupCount:_dups.length,nonMonoCount:_nonMono.length,firstDup:_dups[0]||null,firstNonMono:_nonMono[0]||null},timestamp:Date.now(),hypothesisId:'H1-H2-H3-H4'})}).catch(()=>{});
+    // #endregion
     equitySeries.setData(
       globalEquity.map((p) => ({ time: p.time as Time, value: p.value }))
     );

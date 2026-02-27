@@ -35,6 +35,7 @@ def simulate(
     in_position = False
     entry_price = 0.0
     entry_idx = 0
+    entry_fee_amount = 0.0
     size = 0.0
     trail_extreme = 0.0
 
@@ -113,15 +114,16 @@ def simulate(
             if exit_triggered:
                 slip = exit_price * slippage
                 net_exit = (exit_price - slip) if is_long else (exit_price + slip)
-                fee_cost = abs(net_exit * size) * fees
+                exit_fee = abs(net_exit * size) * fees
 
                 if is_long:
-                    pnl = (net_exit - entry_price) * size - fee_cost
+                    pnl = (net_exit - entry_price) * size - exit_fee - entry_fee_amount
                 else:
-                    pnl = (entry_price - net_exit) * size - fee_cost
+                    pnl = (entry_price - net_exit) * size - exit_fee - entry_fee_amount
 
                 realized_pnl += pnl
-                ret_pct = (pnl / (entry_price * size)) * 100 if entry_price * size > 0 else 0.0
+                capital_at_risk = entry_price * size + entry_fee_amount
+                ret_pct = (pnl / capital_at_risk) * 100 if capital_at_risk > 0 else 0.0
 
                 trades.append({
                     "entry_idx": entry_idx,
@@ -137,6 +139,7 @@ def simulate(
                 })
                 in_position = False
                 size = 0.0
+                entry_fee_amount = 0.0
 
         # --- check entries ---
         if not in_position and entries[i] and i < n - 1:
@@ -158,7 +161,8 @@ def simulate(
                 equity[i] = init_cash + realized_pnl
                 continue
 
-            realized_pnl -= abs(entry_price * size) * fees
+            entry_fee_amount = abs(entry_price * size) * fees
+            realized_pnl -= entry_fee_amount
             in_position = True
             entry_idx = i + 1
             trail_extreme = entry_price
