@@ -6,6 +6,7 @@ daily stats come from daily_metrics; intraday candles come from intraday_1m.
 
 import ctypes
 import gc
+import json
 import logging
 import sys
 import time
